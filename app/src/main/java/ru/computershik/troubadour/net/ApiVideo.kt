@@ -159,7 +159,21 @@ fun Api.videoDetails(videoId: String, playlistId: String?): VideoDetails? {
 
     result.published = Json.renderedText(primary, "dateText")
 
-    val owner = Json.findFirst("videoOwnerRenderer", secondary, 2000)
+    /**
+     * Автора ищем сперва там, где ему положено быть, а не нашлось —
+     * по всему ответу.
+     *
+     * `videoSecondaryInfoRenderer` в ответе клиента WEB бывает не всегда,
+     * и тогда прежний разбор молча оставлял и кружок, и название канала
+     * пустыми, хотя название ролика и счётчик лайков брались из других
+     * мест того же ответа и приходили исправно. Со стороны это и выглядит
+     * как «иногда автор не прогружается».
+     */
+    var owner = Json.findFirst("videoOwnerRenderer", secondary, 2000)
+
+    if (owner == null) {
+        owner = Json.findFirst("videoOwnerRenderer", json, 200000)
+    }
 
     result.channelTitle = Json.renderedText(owner, "title")
     result.subscribers = Json.renderedText(owner, "subscriberCountText")
@@ -326,6 +340,23 @@ fun Api.videoDetails(videoId: String, playlistId: String?): VideoDetails? {
             result.commentsCount = state.comments
         }
 
+        /**
+         * Автора добираем у TV-клиента, если веб его не дал.
+         *
+         * Этот ответ всё равно уже на руках, и кружок с названием канала
+         * в нём есть. Прежде они попросту выбрасывались: `WatchState` их
+         * разбирал, а страница ролика не читала.
+         */
+        if (result.channelTitle.isNullOrEmpty() && !state.channelTitle.isNullOrEmpty()) {
+            result.channelTitle = state.channelTitle
+        }
+
+        if (result.channelThumbnail.isNullOrEmpty() &&
+            !state.channelThumbnail.isNullOrEmpty()
+        ) {
+            result.channelThumbnail = state.channelThumbnail
+        }
+
         result.liked = state.liked
         result.disliked = state.disliked
         result.subscribed = state.subscribed
@@ -333,6 +364,15 @@ fun Api.videoDetails(videoId: String, playlistId: String?): VideoDetails? {
         result.likeParams = state.likeParams
         result.dislikeParams = state.dislikeParams
         result.removeLikeParams = state.removeLikeParams
+    }
+
+    Log.d {
+        "[YouTube/Ролик] Разобрано: название ${if (result.title.isNotEmpty()) "есть" else "нет"}, " +
+            "лайки ${result.likes ?: "нет"}, " +
+            "канал ${result.channelTitle ?: "нет"}, " +
+            "кружок ${if (result.channelThumbnail != null) "есть" else "нет"}, " +
+            "очередь ${result.queue.size}" +
+            (if (secondary == null) " — videoSecondaryInfoRenderer в ответе нет" else "")
     }
 
     return result
