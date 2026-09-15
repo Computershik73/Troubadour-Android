@@ -88,6 +88,41 @@ class ShortsView(context: Context) : FrameLayout(context) {
     private var finishedId: String? = null
 
     /**
+     * Всё содержимое страницы в одном виде — чтобы двигать его целиком.
+     *
+     * Подложка (чернота) остаётся у самой листалки: снимок содержимого
+     * должен быть прозрачным там, где нет ни подписей, ни кнопок, иначе
+     * он закрыл бы собой кадр уходящей страницы.
+     */
+    private val content = FrameLayout(context)
+
+    /**
+     * Уходящая страница — снимком, двумя слоями.
+     *
+     * `TextureView` в холст не рисуется вовсе: он живёт отдельным слоем,
+     * и `draw()` оставляет на его месте пустоту. Поэтому кадр снимается
+     * у него самого (`getBitmap`), а подписи и кнопки — обычной
+     * отрисовкой поверх.
+     */
+    private val ghost = FrameLayout(context)
+    private val ghostFrame = ImageView(context)
+    private val ghostChrome = ImageView(context)
+
+    /** Идёт ли сейчас переход — на это время касания не в счёт. */
+    private var sliding = false
+
+    /**
+     * Превью соседнего ролика — то, что видно в просвете под пальцем.
+     *
+     * Без него за уходящей страницей чернота, и тяга читается как
+     * «экран поехал», а не «следующий ролик подходит». Настоящей
+     * страницы у соседа нет — её содержимое приедет только при переходе,
+     * — но превью у нас на руках с самой ленты.
+     */
+    private val peek = RoundedImage(context)
+    private var peekFor = -1
+
+    /**
      * Ставит поверхность по соотношению сторон ролика, посередине.
      *
      * Зовётся после обычной раскладки: `TextureView` тянет содержимое
@@ -179,6 +214,14 @@ class ShortsView(context: Context) : FrameLayout(context) {
          * раскладкой: см. [placeSurface].
          */
         addView(
+            content,
+            LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+
+        content.addView(
             surface,
             LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -197,7 +240,7 @@ class ShortsView(context: Context) : FrameLayout(context) {
         cover.cornerRadius = 0f
         cover.placeholderColor = 0xFF000000.toInt()
 
-        addView(
+        content.addView(
             cover, 0,
             LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -205,10 +248,10 @@ class ShortsView(context: Context) : FrameLayout(context) {
             )
         )
 
-        addView(buildTexts())
-        addView(buildButtons())
+        content.addView(buildTexts())
+        content.addView(buildButtons())
 
-        addView(
+        content.addView(
             ring,
             LayoutParams(dp(36f), dp(36f), Gravity.CENTER)
         )
@@ -216,13 +259,53 @@ class ShortsView(context: Context) : FrameLayout(context) {
         notice.gravity = Gravity.CENTER
         notice.visibility = GONE
 
-        addView(
+        content.addView(
             notice,
             LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 Gravity.CENTER
             ).apply { leftMargin = dp(24f); rightMargin = dp(24f) }
+        )
+
+        peek.cornerRadius = 0f
+        peek.placeholderColor = 0xFF000000.toInt()
+        peek.visibility = GONE
+
+        addView(
+            peek,
+            LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+
+        ghostFrame.scaleType = ImageView.ScaleType.FIT_CENTER
+
+        ghost.addView(
+            ghostFrame,
+            LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+
+        ghost.addView(
+            ghostChrome,
+            LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+
+        ghost.visibility = GONE
+
+        addView(
+            ghost,
+            LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
         )
     }
 
@@ -489,6 +572,145 @@ class ShortsView(context: Context) : FrameLayout(context) {
         }
     }
 
+    /**
+     * Переход к соседнему ролику — со сдвигом страниц, а не подменой.
+     *
+     * В iOS-версии листалка это `UIScrollView` с постраничной прокруткой:
+     * каждая страница там своя, с собственным превью, и переход выходит
+     * сам собой. Здесь страница одна, и содержимое у неё меняется
+     * на месте, — поэтому уходящая снимается снимком и уезжает, пока
+     * новая въезжает с той стороны, откуда её ждут.
+     *
+     * Снимок берётся двумя слоями: кадр у самой поверхности
+     * (`TextureView` в холст не рисуется), подписи и кнопки — обычной
+     * отрисовкой поверх.
+     */
+    private fun advance(index: Int) {
+        if (index < 0 || index >= items.size || index == at) {
+            return
+        }
+
+        val box = height
+
+        if (box <= 0 || sliding) {
+            show(index)
+
+            return
+        }
+
+        val upwards = index > at
+
+        ghostFrame.setImageBitmap(frameSnapshot())
+        ghostChrome.setImageBitmap(chromeSnapshot())
+
+        hidePeek()
+
+        val from = content.translationY
+
+        ghost.translationY = from
+        ghost.visibility = VISIBLE
+
+        show(index)
+
+        /**
+         * Новая страница встаёт вплотную к уходящей, а не к краю экрана.
+         *
+         * Палец мог увести ту на треть хода; начни новая от целого
+         * экрана — между ними зияла бы щель в эту самую треть.
+         */
+        content.translationY = from + if (upwards) box.toFloat() else -box.toFloat()
+
+        sliding = true
+
+        content.animate()
+            .translationY(0f)
+            .setDuration(SLIDE_MS)
+            .withEndAction { sliding = false }
+            .start()
+
+        ghost.animate()
+            .translationY(if (upwards) -box.toFloat() else box.toFloat())
+            .setDuration(SLIDE_MS)
+            .withEndAction {
+                ghost.visibility = GONE
+
+                ghostFrame.setImageBitmap(null)
+                ghostChrome.setImageBitmap(null)
+            }
+            .start()
+    }
+
+    /**
+     * Ставит превью соседа в просвет по нынешней тяге.
+     *
+     * Сосед берётся по направлению: тянут вверх — следующий, вниз —
+     * прежний. За краем ленты соседа нет, и просвет остаётся чёрным:
+     * там и правда ничего нет.
+     */
+    private fun peekAt(shift: Float) {
+        val box = height
+
+        if (box <= 0 || shift == 0f) {
+            hidePeek()
+
+            return
+        }
+
+        val index = if (shift < 0) at + 1 else at - 1
+
+        if (index < 0 || index >= items.size) {
+            hidePeek()
+
+            return
+        }
+
+        if (peekFor != index) {
+            peekFor = index
+
+            ImageLoader.loadInto(peek, items[index].thumbnail, Metrics.points(width))
+        }
+
+        peek.translationY = shift + if (shift < 0) box.toFloat() else -box.toFloat()
+        peek.visibility = VISIBLE
+    }
+
+    private fun hidePeek() {
+        peek.visibility = GONE
+        peekFor = -1
+    }
+
+    /** Кадр уходящей страницы — у самой поверхности. */
+    private fun frameSnapshot(): android.graphics.Bitmap? = try {
+        if (surface.isAvailable) surface.bitmap else null
+    } catch (error: Throwable) {
+        null
+    }
+
+    /**
+     * Подписи и кнопки уходящей страницы.
+     *
+     * Подложка у содержимого прозрачная, поэтому на месте кадра
+     * в снимке остаётся пустота — сквозь неё виден нижний слой.
+     */
+    private fun chromeSnapshot(): android.graphics.Bitmap? {
+        if (content.width <= 0 || content.height <= 0) {
+            return null
+        }
+
+        return try {
+            val shot = android.graphics.Bitmap.createBitmap(
+                content.width, content.height, android.graphics.Bitmap.Config.ARGB_8888
+            )
+
+            content.draw(android.graphics.Canvas(shot))
+
+            shot
+        } catch (error: Throwable) {
+            // Памяти не хватило — обойдёмся одним кадром.
+            null
+        }
+    }
+
     private fun showNotice(text: String) {
         ring.stop()
 
@@ -503,20 +725,92 @@ class ShortsView(context: Context) : FrameLayout(context) {
     override fun onInterceptTouchEvent(event: MotionEvent): Boolean =
         event.actionMasked == MotionEvent.ACTION_MOVE
 
+    /**
+     * Страница идёт за пальцем, а не прыгает по отпусканию.
+     *
+     * В оригинале это делает постраничная прокрутка: содержимое едет
+     * вместе с рукой, и по отпусканию либо доезжает до соседа, либо
+     * возвращается на место. Здесь то же самое — сдвигом самого
+     * содержимого.
+     *
+     * За край ленты не пускаем дальше четверти хода: тянуть в пустоту
+     * можно, но она должна пружинить, иначе непонятно, что дальше
+     * ничего нет.
+     */
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (sliding) {
+            return true
+        }
+
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> downY = event.y
 
-            MotionEvent.ACTION_UP -> {
+            MotionEvent.ACTION_MOVE -> {
+                var shift = event.y - downY
+
+                val edge = (shift < 0 && at + 1 >= items.size) ||
+                    (shift > 0 && at <= 0)
+
+                if (edge) {
+                    shift /= 4f
+                }
+
+                content.translationY = shift
+
+                peekAt(shift)
+            }
+
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 val shift = event.y - downY
 
                 val threshold = height / 6f
 
-                when {
-                    shift < -threshold -> show(at + 1)
-                    shift > threshold -> show(at - 1)
-                    else -> PlayerEngine.togglePlay()
+                val wanted = when {
+                    shift < -threshold && at + 1 < items.size -> at + 1
+                    shift > threshold && at > 0 -> at - 1
+                    else -> -1
                 }
+
+                if (wanted >= 0) {
+                    /**
+                     * Уходящая страница продолжает путь оттуда, где её
+                     * оставил палец: [advance] снимает её нынешним
+                     * сдвигом и доводит до края.
+                     */
+                    advance(wanted)
+
+                    return true
+                }
+
+                if (kotlin.math.abs(shift) < dp(8f)) {
+                    content.translationY = 0f
+
+                    hidePeek()
+
+                    PlayerEngine.togglePlay()
+
+                    return true
+                }
+
+                // Не дотянули — возвращаем на место.
+                sliding = true
+
+                content.animate()
+                    .translationY(0f)
+                    .setDuration(SLIDE_MS)
+                    .withEndAction {
+                        sliding = false
+
+                        hidePeek()
+                    }
+                    .start()
+
+                peek.animate()
+                    .translationY(
+                        if (peek.translationY < 0) -height.toFloat() else height.toFloat()
+                    )
+                    .setDuration(SLIDE_MS)
+                    .start()
             }
         }
 
@@ -610,13 +904,19 @@ class ShortsView(context: Context) : FrameLayout(context) {
         }
 
         if (Settings.autoplayNextShort && at + 1 < items.size) {
-            show(at + 1)
+            advance(at + 1)
 
             return
         }
 
         PlayerEngine.seekTo(0.0)
         PlayerEngine.play()
+    }
+
+    companion object {
+
+        /** Сколько длится переход между роликами, мс. */
+        private const val SLIDE_MS = 220L
     }
 
     fun stop() {
