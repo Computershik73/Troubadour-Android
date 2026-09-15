@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <!--
+        Шапку со словесным знаком приложение рисует само — так же, как это
+        делал Navbar.xaml в версии для Windows 10 Mobile и YTShellViewController
+        в версии для iOS. Поэтому системной панели здесь нет.
+
+        Theme.DeviceDefault появилась в API 14 и есть на всём нашем
+        диапазоне; тащить appcompat ради одного стиля нечестно
+        по отношению к слабым устройствам.
+    -->
+    <style name="TroubadourTheme" parent="@android:style/Theme.DeviceDefault.NoActionBar">
+        <item name="android:windowBackground">@color/window_background</item>
+        <item name="android:colorBackground">@color/window_background</item>
+        <item name="android:windowAnimationStyle">@null</item>
+    </style>
+
+    <!--
+        Полноэкранный вид ролика: строка состояния и кнопки навигации
+        уходят. Отдельным стилем, а не флагами окна: на 4.1 флаг
+        SYSTEM_UI_FLAG_IMMERSIVE ещё не существует, и надёжнее объявить
+        окно полноэкранным заранее.
+    -->
+    <style name="TroubadourTheme.Fullscreen">
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowContentOverlay">@null</item>
+    </style>
+</resources>

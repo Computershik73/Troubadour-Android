@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Куда кладутся скачанные ролики: личная папка приложения. -->
+    <files-path name="downloads" path="downloads/" />
+    <external-files-path name="external_downloads" path="downloads/" />
+
+    <!-- Общие «Загрузки»: туда кладётся скачанное на Android до десятой. -->
+    <external-path name="public_downloads" path="Download/Troubadour/" />
+
+    <!-- Журнал — его отдают в «Поделиться» с экрана «О программе». -->
+    <files-path name="logs" path="." />
+</paths>

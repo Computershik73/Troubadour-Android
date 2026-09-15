@@ -1,0 +1,139 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="ru.computershik.troubadour">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!--
+        Скачанное кладётся в общие «Загрузки», в папку Troubadour, — чтобы
+        ролик можно было найти файловым управляющим и скинуть на компьютер.
+        До Android 6 разрешение на это выдаётся при установке, поэтому оно
+        объявлено здесь: иначе на старых устройствах спросить его будет уже
+        негде. С шестой по девятую версию оно спрашивается на ходу,
+        а с десятой не нужно вовсе — там запись идёт через MediaStore,
+        и своя запись в общей коллекции заводится без разрешений.
+    -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+
+    <!-- Скачивание продолжается, когда приложение свёрнуто. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+
+    <!--
+        Оригинал живёт на iPhone 4 — сенсорный экран там есть всегда.
+        Здесь же приложение ставят и на приставки, поэтому сенсор
+        объявлен необязательным.
+    -->
+    <uses-feature
+        android:name="android.hardware.touchscreen"
+        android:required="false" />
+    <uses-feature
+        android:name="android.software.leanback"
+        android:required="false" />
+
+    <application
+        android:name=".App"
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:largeHeap="true"
+        android:requestLegacyExternalStorage="true"
+        android:supportsRtl="true"
+        android:theme="@style/TroubadourTheme"
+        android:usesCleartextTraffic="true">
+
+        <!--
+            Экран ровно один — так же, как в оригинале.
+
+            Там разделы нижней панели живут внутри одной оболочки
+            (`YTShellViewController`), а переходы вглубь идут стопкой
+            `UINavigationController` с невидимой полосой: шапку каждый
+            экран рисует сам. Здесь то же самое делает `Nav` — своя
+            стопка видов внутри единственной Activity.
+
+            Выигрыш тот же, что и там: переключение вкладки не теряет
+            уже загруженную ленту, а свёрнутый в окно ролик переживает
+            любые переходы, потому что живёт над стопкой, а не в ней.
+
+            Повороты обрабатываем сами: пересоздание экрана оборвало бы
+            воспроизведение.
+        -->
+        <activity
+            android:name=".ui.MainActivity"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard|navigation|uiMode"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:launchMode="singleTask"
+            android:windowSoftInputMode="adjustResize">
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+
+            <!-- Ссылки на ролики открываются в приложении. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" android:host="www.youtube.com" />
+                <data android:scheme="https" android:host="m.youtube.com" />
+                <data android:scheme="https" android:host="youtube.com" />
+                <data android:scheme="https" android:host="youtu.be" />
+            </intent-filter>
+        </activity>
+
+        <!--
+            Скачивание живёт в службе переднего плана: иначе система снимает
+            его вместе со свёрнутым приложением, и очередь из пяти роликов
+            не доживает до конца.
+        -->
+        <service
+            android:name=".net.DownloadService"
+            android:exported="false" />
+
+        <!--
+            Держит приложение живым, пока идёт звук. Сама ничего
+            не воспроизводит — только объявляет системе, что происходящее
+            важно. В оригинале то же самое делала одна строчка `audio`
+            в UIBackgroundModes.
+        -->
+        <service
+            android:name=".player.PlaybackService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
+
+        <!--
+            Через него скачанный ролик уходит в системный плеер и в «Поделиться».
+            С Android 7 приложение не имеет права передавать наружу путь
+            к своему файлу (file://) — только временный адрес content://.
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
+        <!--
+            Решатель PO-токена живёт отдельным процессом.
+
+            WebView исполняет JavaScript страницы на главном потоке
+            своего процесса, а программа BotGuard считает тяжело и
+            написана не нами. В общем процессе её счёт делил поток
+            с рисованием окна и вешал слабые устройства намертво.
+            Здесь у неё свой поток, и замереть она может только сама.
+        -->
+        <service
+            android:name=".net.PoService"
+            android:exported="false"
+            android:process=":po" />
+    </application>
+</manifest>

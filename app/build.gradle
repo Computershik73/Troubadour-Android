@@ -1,0 +1,284 @@
+apply plugin: 'com.android.application'
+apply plugin: 'kotlin-android'
+
+// Пароли лежат в keystore.properties рядом с проектом; в git этот файл не
+// попадает. Нет файла — собирается неподписанный релиз: это удобно для
+// чужой машины и для сборки на сервере.
+def keystoreProperties = new Properties()
+def keystorePropertiesFile = rootProject.file('keystore.properties')
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+}
+
+android {
+    // На AGP 4.1 имя пакета задаётся в манифесте (атрибут package),
+    // а не свойством namespace — оно появилось только в AGP 7.
+    compileSdkVersion 30
+    buildToolsVersion "29.0.3"
+
+    defaultConfig {
+        applicationId "ru.computershik.troubadour"
+
+        // Android 4.1. Ровесник iPhone 4S, на котором работает оригинал,
+        // и первая версия с MediaCodec и TLS 1.2 в провайдере.
+        minSdkVersion 16
+
+        // Верхняя не последняя, и это нормально: установку блокируют
+        // только для targetSdk ниже 24.
+        targetSdkVersion 29
+
+        versionCode 1
+        versionName "1.4"
+
+        /**
+         * Отметка сборки — время, когда собран этот apk.
+         *
+         * Журнал дописывается, а не заводится заново, и в одном файле
+         * лежат записи от разных сборок вперемешку. Версия между ними
+         * не меняется, и различить их было нечем: приходилось гадать
+         * по времени, попала ли правка в ту сборку, что писала строку.
+         * Теперь каждая запись начинается с этой отметки.
+         */
+        buildConfigField "String", "BUILD_STAMP",
+            "\"${new Date().format('yyyy-MM-dd HH:mm', TimeZone.getDefault())}\""
+
+        // Все двенадцать переводов лежат в assets/lang и читаются нами
+        // самими — ключом служит русская строка, как в оригинале.
+        // resConfigs здесь не нужен: своих values-<язык> у нас нет.
+    }
+
+    signingConfigs {
+        release {
+            if (keystoreProperties.containsKey('storeFile')) {
+                storeFile rootProject.file(keystoreProperties['storeFile'])
+                storePassword keystoreProperties['storePassword']
+                keyAlias keystoreProperties['keyAlias']
+                keyPassword keystoreProperties['keyPassword']
+
+                /**
+                 * Обе схемы подписи, и первая здесь важнее второй.
+                 *
+                 * Схема v2 появилась в Android 7.0, и всё, что старше,
+                 * о ней не знает вовсе: подписанный только ею файл
+                 * на 4.1 не установится. Первая схема — подпись внутри
+                 * самого архива, как у обычного JAR, — понятна всем
+                 * версиям, но на новых считается устаревшей и одна
+                 * не даёт ускоренной проверки.
+                 *
+                 * Поэтому обе: v1 ради нижней границы, v2 ради верхней.
+                 * Полагаться на умолчания нельзя — они зависят от версии
+                 * сборщика и от `minSdkVersion`.
+                 */
+                v1SigningEnabled true
+                v2SigningEnabled true
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            minifyEnabled false
+
+            /**
+             * Отладочная подписывается тем же ключом, что и готовая.
+             *
+             * Иначе они не заменяют друг друга: подпись у приложения
+             * одна, и поставить отладочную поверх готовой можно только
+             * удалив её вместе с входом и настройками. А отладочная
+             * нужна ровно тогда, когда на устройстве уже стоит готовая
+             * и что-то пошло не так, — то есть в самый неудобный
+             * для удаления миг.
+             */
+            if (keystoreProperties.containsKey('storeFile')) {
+                signingConfig signingConfigs.release
+            }
+
+            // Отладочная сборка пишет журнал и в logcat, и в файл —
+            // ровно как отладочная сборка оригинала.
+            buildConfigField "boolean", "LOG", "true"
+        }
+        release {
+            if (keystoreProperties.containsKey('storeFile')) {
+                signingConfig signingConfigs.release
+            }
+
+            minifyEnabled true
+            shrinkResources false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+
+            // Готовая сборка молчит: строки журнала стоят склейки формата,
+            // а иные из них зовутся на каждый кусок потока.
+            buildConfigField "boolean", "LOG", "false"
+        }
+    }
+
+    // Значки берутся по имени через getIdentifier — как YTIcon в оригинале,
+    // где набор выбирается темой. Ужимальщик ресурсов такие обращения не
+    // видит, поэтому shrinkResources выключен, а не настроен списком.
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    kotlinOptions {
+        jvmTarget = '1.8'
+    }
+
+    lintOptions {
+        abortOnError false
+    }
+
+    packagingOptions {
+        exclude 'META-INF/*.kotlin_module'
+    }
+}
+
+dependencies {
+    implementation "org.jetbrains.kotlin:kotlin-stdlib:$kotlin_version"
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.6.4'
+
+    // Ради FileProvider: без него скачанный файл не передать системному
+    // плееру на Android 7 и новее.
+    implementation 'androidx.core:core:1.0.0'
+
+    // Ради `MediaStyle`: карточка воспроизведения в шторке с превью
+    // и кнопками. В `androidx.core` её нет, а рисовать свою разметку
+    // ради трёх кнопок — лишнее. Версия 1.0.0 живёт с minSdk 14.
+    implementation 'androidx.media:media:1.0.0'
+
+    // Последняя ветка OkHttp с поддержкой API 9–20. 4.x требует API 21.
+    implementation 'com.squareup.okhttp3:okhttp:3.12.13'
+
+    // Последняя ветка ExoPlayer с minSdk 16; media3 требует API 21.
+    // Он же снимает половину сложности оригинала: там ради AVPlayer
+    // пришлось поднимать HLS-прокси на 127.0.0.1 и перекладывать fMP4
+    // в MPEG-TS, здесь фрагменты отдаются прямо своим DataSource.
+    implementation 'com.google.android.exoplayer:exoplayer-core:2.13.3'
+    implementation 'com.google.android.exoplayer:exoplayer-ui:2.13.3'
+
+    // Только ради одного хода цепочки: готовый плейлист от IOS-клиента.
+    // Он играет там, где остальное упёрлось в анти-бота.
+    implementation 'com.google.android.exoplayer:exoplayer-hls:2.13.3'
+    implementation 'com.google.android.exoplayer:extension-okhttp:2.13.3'
+}
+
+
+/**
+ * Отладочный пакет ужимается после сборки.
+ *
+ * Упаковщик правит готовый apk на месте: старую запись бросает, новую
+ * дописывает в конец, а освободившееся место остаётся дырой. Оттого один
+ * и тот же набор файлов давал то 6,4 МБ, то 10,6 МБ — содержимое до байта
+ * одинаковое, а разница ровно в размер прежнего `classes.dex`. Устройству
+ * дыра безразлична, но пересылать лишние мегабайты незачем.
+ *
+ * Переписываем архив `zipalign`, а потом подписываем заново: выравнивание
+ * сдвигает записи и тем самым портит подпись второй схемы — по правилам
+ * Android она и должна ставиться последней.
+ *
+ * Трогаем только отладочные сборки: у выпуска ключ настоящий, и лезть
+ * в его подпись ради четырёх мегабайт нечестно.
+ */
+android.applicationVariants.all { variant ->
+    if (variant.buildType.name != 'debug') {
+        return
+    }
+
+    /**
+     * Вешаем на саму упаковку, а не на `assemble`.
+     *
+     * `assemble` — задача-пустышка: своей работы у неё нет, и Gradle
+     * считает её выполненной, даже когда пакет только что пересобрали.
+     * Тогда наш шаг не запускался вовсе.
+     */
+    variant.packageApplicationProvider.get().doLast {
+        def windows = System.getProperty('os.name').toLowerCase().contains('win')
+
+        def tools = new File(android.sdkDirectory, "build-tools/${android.buildToolsVersion}")
+
+        def zipalign = new File(tools, windows ? 'zipalign.exe' : 'zipalign')
+        def apksigner = new File(tools, windows ? 'apksigner.bat' : 'apksigner')
+
+        if (!zipalign.exists() || !apksigner.exists()) {
+            logger.lifecycle('Пакет не ужат: в build-tools нет zipalign или apksigner')
+
+            return
+        }
+
+        def signing = variant.signingConfig
+
+        variant.outputs.each { output ->
+            def apk = output.outputFile
+
+            if (apk == null || !apk.exists()) {
+                return
+            }
+
+            def before = apk.length()
+
+            def aligned = new File(apk.parentFile, apk.name + '.aligned')
+            def signed = new File(apk.parentFile, apk.name + '.signed')
+
+            aligned.delete()
+            signed.delete()
+
+            /**
+             * Судим по файлу, а не по коду возврата.
+             *
+             * `zipalign` из build-tools 29.0.3 под Windows отвечает
+             * единицей и тогда, когда всё сделал: архив выровнен и цел,
+             * а код возврата говорит об ошибке. Поэтому смотрим, появился
+             * ли файл и не пуст ли он; если нет — оставляем пакет как был,
+             * ронять из-за этого сборку не за что.
+             */
+            def said = new ByteArrayOutputStream()
+
+            exec {
+                commandLine zipalign.absolutePath, '-f', '4',
+                            apk.absolutePath, aligned.absolutePath
+
+                standardOutput = said
+                errorOutput = said
+                ignoreExitValue = true
+            }
+
+            if (!aligned.exists() || aligned.length() < 1024) {
+                logger.lifecycle('Пакет не ужат: zipalign не дал файла. ' +
+                                 said.toString().trim())
+
+                aligned.delete()
+
+                return
+            }
+
+            exec {
+                commandLine apksigner.absolutePath, 'sign',
+                            '--ks', signing.storeFile.absolutePath,
+                            '--ks-pass', "pass:${signing.storePassword}",
+                            '--ks-key-alias', signing.keyAlias,
+                            '--key-pass', "pass:${signing.keyPassword}",
+                            '--out', signed.absolutePath,
+                            aligned.absolutePath
+            }
+
+            aligned.delete()
+
+            if (!signed.exists() || signed.length() < 1024) {
+                logger.lifecycle('Пакет не ужат: подписать заново не вышло')
+
+                signed.delete()
+
+                return
+            }
+
+            apk.delete()
+
+            signed.renameTo(apk)
+
+            logger.lifecycle(String.format('Пакет ужат: %d КБ вместо %d КБ',
+                                           (long) (apk.length() / 1024),
+                                           (long) (before / 1024)))
+        }
+    }
+}
