@@ -154,6 +154,113 @@ class PlayerStage(context: Context) : ViewGroup(context) {
             requestLayout()
         }
 
+    /**
+     * Кадр растянут по экрану — полос по краям нет, края обрезаны.
+     *
+     * Вторая из двух укладок; первая вписывает кадр целиком. Сюда
+     * приводит защёлкивание при увеличении двумя пальцами.
+     */
+    var fillsScreen = false
+        set(value) {
+            field = value
+
+            requestLayout()
+        }
+
+    /**
+     * Свободное увеличение кадра двумя пальцами и его сдвиг.
+     *
+     * Единица — обычная величина; ниже неё не опускаемся, под кадром
+     * чернота, а не страница.
+     */
+    private var zoomScale = 1f
+    private var zoomShift = android.graphics.PointF(0f, 0f)
+
+    private var zoomFrom = 1f
+    private var zoomAnchor = android.graphics.PointF(0f, 0f)
+    private var zoomUsed = false
+
+    /** Сообщить человеку одной строкой — заводится снаружи. */
+    var onNotice: ((String) -> Unit)? = null
+
+    /**
+     * Величина, при которой полосы исчезают.
+     *
+     * Это отношение сторон кадра к сторонам экрана — что у лежачего
+     * ролика на высоком экране, что у стоячего на широком. Единица
+     * означает, что полос нет вовсе и защёлкивать нечего.
+     */
+    private fun fillRatio(): Float {
+        val box = width.toFloat()
+        val tall = height.toFloat()
+
+        if (box <= 0 || tall <= 0) {
+            return 1f
+        }
+
+        val video = PlayerEngine.videoRatio
+        val screen = box / tall
+
+        if (video <= 0) {
+            return 1f
+        }
+
+        return maxOf(video / screen, screen / video)
+    }
+
+    /**
+     * Пора ли защёлкивать подгон.
+     *
+     * Порог — восемь сотых: разница, которую глаз уже не отличает
+     * от точного совпадения, но которой хватает, чтобы не сработать
+     * случайно по дороге к настоящему увеличению. Полосы шириной меньше
+     * сотой доли экрана не в счёт — там защёлкивать нечего.
+     */
+    private fun shouldSnapToFill(scale: Float): Boolean {
+        if (fillsScreen) {
+            return false
+        }
+
+        val ratio = fillRatio()
+
+        return ratio > 1.01f && kotlin.math.abs(scale - ratio) < 0.08f
+    }
+
+    /**
+     * Сдвиг, укладывающийся в границы.
+     *
+     * За край кадр не пускаем вовсе, а не подтягиваем потом: подтянутый
+     * кадр дёргается под пальцем, а не пущенный просто упирается.
+     */
+    private fun settledShift(): android.graphics.PointF {
+        if (zoomScale <= 1f) {
+            return android.graphics.PointF(0f, 0f)
+        }
+
+        val limitX = width * (zoomScale - 1f) / 2f
+        val limitY = height * (zoomScale - 1f) / 2f
+
+        return android.graphics.PointF(
+            zoomShift.x.coerceIn(-limitX, limitX),
+            zoomShift.y.coerceIn(-limitY, limitY)
+        )
+    }
+
+    private fun applyZoom() {
+        surface.scaleX = zoomScale
+        surface.scaleY = zoomScale
+        surface.translationX = zoomShift.x
+        surface.translationY = zoomShift.y
+    }
+
+    /** Вернуть кадр к обычной величине — при выходе, смене ролика, подгоне. */
+    fun resetZoom() {
+        zoomScale = 1f
+        zoomShift.set(0f, 0f)
+
+        applyZoom()
+    }
+
     /** Показан ли пульт. Прячется сам через несколько секунд. */
     var controlsVisible = true
         private set
@@ -562,7 +669,145 @@ class PlayerStage(context: Context) : ViewGroup(context) {
 
     // --- Касания ----------------------------------------------------------
 
+    /**
+     * Увеличение двумя пальцами — только в развёрнутом виде.
+     *
+     * В окне кадр стоит в потоке страницы, и растить его некуда:
+     * под ним лежит описание, а не чернота.
+     */
+    private val pinch = android.view.ScaleGestureDetector(
+        context,
+        object : android.view.ScaleGestureDetector.SimpleOnScaleGestureListener() {
+
+            override fun onScaleBegin(
+                detector: android.view.ScaleGestureDetector
+            ): Boolean {
+                if (!fullscreen) {
+                    return false
+                }
+
+                zoomUsed = false
+                zoomAnchor.set(detector.focusX, detector.focusY)
+
+                return true
+            }
+
+            override fun onScale(
+                detector: android.view.ScaleGestureDetector
+            ): Boolean {
+                if (!fullscreen || zoomUsed) {
+                    return true
+                }
+
+                /**
+                 * `ScaleGestureDetector` отдаёт множитель **шага**, а не
+                 * всего жеста, — в отличие от `UIPinchGestureRecognizer`,
+                 * откуда правило перенесено. Поэтому копим сами, умножая
+                 * нынешнюю величину на шаг.
+                 */
+                val wanted = zoomScale * detector.scaleFactor
+
+                // Ниже единицы кадр не уменьшаем: под ним чернота.
+                val scale = wanted.coerceIn(1f, 6f)
+
+                zoomShift.set(
+                    zoomShift.x + detector.focusX - zoomAnchor.x,
+                    zoomShift.y + detector.focusY - zoomAnchor.y
+                )
+
+                zoomAnchor.set(detector.focusX, detector.focusY)
+                zoomScale = scale
+
+                // За край кадр не пускаем вовсе, а не подтягиваем потом.
+                zoomShift = settledShift()
+
+                applyZoom()
+
+                /**
+                 * Подошли близко к величине, при которой полосы исчезают, —
+                 * защёлкиваем её.
+                 *
+                 * Руками поймать эту величину нельзя: промах в пару
+                 * процентов оставляет то щель по краю, то лишнюю обрезку.
+                 * А промахнуться легко — кадр при этом выглядит почти
+                 * правильно, и человек так и смотрит с полоской в палец
+                 * шириной.
+                 */
+                if (shouldSnapToFill(scale)) {
+                    zoomUsed = true
+
+                    resetZoom()
+
+                    fillsScreen = true
+
+                    onNotice?.invoke(ru.computershik.troubadour.loc("Полосы убраны"))
+                }
+
+                return true
+            }
+        }
+    )
+
+    /** Откуда ведут увеличенный кадр одним пальцем. */
+    private var dragFrom: android.graphics.PointF? = null
+    private var dragged = false
+
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        pinch.onTouchEvent(event)
+
+        if (pinch.isInProgress) {
+            dragFrom = null
+
+            return true
+        }
+
+        /**
+         * Увеличенный кадр возят одним пальцем.
+         *
+         * Пока кадр обычной величины, возить нечего, и палец остаётся
+         * тем, чем был, — показать или спрятать пульт.
+         */
+        if (fullscreen && zoomScale > 1f) {
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    dragFrom = android.graphics.PointF(event.x, event.y)
+                    dragged = false
+                }
+
+                MotionEvent.ACTION_MOVE -> {
+                    val from = dragFrom
+
+                    if (from != null) {
+                        zoomShift.set(
+                            zoomShift.x + event.x - from.x,
+                            zoomShift.y + event.y - from.y
+                        )
+
+                        from.set(event.x, event.y)
+
+                        zoomShift = settledShift()
+
+                        applyZoom()
+
+                        dragged = true
+                    }
+
+                    return true
+                }
+
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    dragFrom = null
+
+                    // Возили кадр — значит пульт не трогаем.
+                    if (dragged) {
+                        dragged = false
+
+                        return true
+                    }
+                }
+            }
+        }
+
         if (event.actionMasked != MotionEvent.ACTION_UP) {
             return true
         }
@@ -670,9 +915,28 @@ class PlayerStage(context: Context) : ViewGroup(context) {
          * шире, и картинка во всю ширину выходила бы приплюснутой.
          * Вписываем по меньшей стороне и ставим по центру; чёрные поля
          * по краям тут не изъян, а единственный честный способ.
+         *
+         * Пропорция берётся у самой дорожки, а не назначается: стоячий
+         * ролик 9:16 в место под 16:9 вписывался бы узкой полосой
+         * посередине.
+         *
+         * При [fillsScreen] правило обратное: кадр покрывает место
+         * целиком по **большей** стороне, а лишнее уходит за края.
+         * Полос тогда нет, но и края обрезаны — это выбор человека,
+         * а не наша догадка.
          */
-        val frameHeight = minOf(height, width * 9 / 16)
-        val frameWidth = minOf(width, height * 16 / 9)
+        val ratio = PlayerEngine.videoRatio.takeIf { it > 0 } ?: (16f / 9f)
+
+        val frameHeight: Int
+        val frameWidth: Int
+
+        if (fillsScreen) {
+            frameHeight = maxOf(height, (width / ratio).toInt())
+            frameWidth = maxOf(width, (height * ratio).toInt())
+        } else {
+            frameHeight = minOf(height, (width / ratio).toInt())
+            frameWidth = minOf(width, (height * ratio).toInt())
+        }
 
         surface.frame(
             (width - frameWidth) / 2, (height - frameHeight) / 2,

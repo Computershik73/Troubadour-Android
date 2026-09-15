@@ -60,6 +60,9 @@ object PlayerEngine {
     /** Пришёл первый кадр нового ролика — прежний «отпечаток» ушёл. */
     const val FIRST_FRAME = "player-first-frame"
 
+    /** Стала известна пропорция кадра — подгонка её перечитывает. */
+    const val VIDEO_SIZE = "player-video-size"
+
     var player: SimpleExoPlayer? = null
         private set
 
@@ -111,6 +114,15 @@ object PlayerEngine {
 
     /** Куда рисовать кадр. */
     private var surface: TextureView? = null
+
+    /**
+     * Отношение ширины кадра к его высоте, как его называет сам поток.
+     *
+     * Шестнадцать к девяти — не догадка, а разумное начало: пока дорожка
+     * не разобрана, ставить что-то другое не из чего.
+     */
+    var videoRatio: Float = 16f / 9f
+        private set
 
     // --- Сеть -------------------------------------------------------------
 
@@ -260,6 +272,32 @@ object PlayerEngine {
 
             override fun onRenderedFirstFrame() {
                 Notify.post(FIRST_FRAME)
+            }
+
+            /**
+             * Размер кадра нужен подгонке: по нему кадр вписывается
+             * в отведённое место и по нему же считается величина,
+             * при которой полосы исчезают.
+             *
+             * Пропорцию берём с поправкой на неквадратный пиксель —
+             * `pixelWidthHeightRatio`: у части дорожек он не единица,
+             * и без него кадр вышел бы приплюснутым.
+             */
+            override fun onVideoSizeChanged(
+                width: Int,
+                height: Int,
+                rotation: Int,
+                pixelRatio: Float
+            ) {
+                if (width <= 0 || height <= 0) {
+                    return
+                }
+
+                val ratio = width * (if (pixelRatio > 0) pixelRatio else 1f) / height
+
+                videoRatio = if (rotation == 90 || rotation == 270) 1f / ratio else ratio
+
+                Notify.post(VIDEO_SIZE, videoRatio)
             }
         })
 

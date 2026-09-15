@@ -411,6 +411,8 @@ class PlayerScreen(
         stage.onSeek = { PlayerEngine.seekTo(it) }
         stage.onSkip = { skipBy(it) }
         stage.onFullscreen = { toggleFullscreen() }
+
+        stage.onNotice = { text -> Toast.show(context, text) }
         stage.onCollapse = { collapse() }
         stage.onSettings = { openMenu() }
 
@@ -1069,6 +1071,11 @@ class PlayerScreen(
     private fun load() {
         askedAudioTrack = false
 
+        // Новый ролик — своя пропорция; подгон прежнего к нему не относится.
+        stage.resetZoom()
+
+        stage.fillsScreen = false
+
         stage.setBusy(true)
 
         // Прежний кадр прячем: иначе он висит «отпечатком» до первого нового.
@@ -1308,6 +1315,19 @@ class PlayerScreen(
         }
 
         fullscreen = want
+
+        /**
+         * Из развёрнутого вида выходим к обычному кадру.
+         *
+         * Увеличение и растяжка — свойства полного экрана: в окне кадр
+         * стоит в потоке страницы, и увеличенный он налезал бы
+         * на описание.
+         */
+        if (!fullscreen) {
+            stage.resetZoom()
+
+            stage.fillsScreen = false
+        }
 
         stage.fullscreen = fullscreen
 
@@ -1656,6 +1676,9 @@ class PlayerScreen(
                 })
             }
         }
+
+        /** Стала известна пропорция кадра — переложить его по ней. */
+        Notify.on(PlayerEngine.VIDEO_SIZE, this) { stage.requestLayout() }
 
         Notify.on(PlayerEngine.FIRST_FRAME, this) {
             stage.showFrame()
