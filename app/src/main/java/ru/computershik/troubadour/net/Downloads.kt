@@ -10,6 +10,7 @@ import org.json.JSONObject
 import ru.computershik.troubadour.App
 import ru.computershik.troubadour.Log
 import ru.computershik.troubadour.Notify
+import ru.computershik.troubadour.Settings
 import ru.computershik.troubadour.loc
 import ru.computershik.troubadour.player.Mp4Writer
 import ru.computershik.troubadour.player.Sabr
@@ -28,6 +29,15 @@ class Download {
 
     /** Выбранная ступень; 0 — что дадут. */
     var height: Int = 0
+
+    /**
+     * Названная человеком звуковая дорожка; пусто — по настройке.
+     *
+     * Заполняется только при «спрашивать каждый раз»: во всех прочих
+     * ладах дорожку называет правило, и называет её в миг скачивания,
+     * когда ответ `/player` уже на руках.
+     */
+    var audioTrack: String? = null
 
     /** Сколько байт уже взято и сколько всего — для доли. */
     var received: Long = 0
@@ -589,7 +599,16 @@ object Downloads {
          * (`detachedSabrFor`) и складывает фрагменты своим писателем MP4.
          * Здесь тот же ход, только складывает их системный сводчик.
          */
-        val sabr = Streams.detachedSabrFor(player, item.height)
+        /**
+         * Какую озвучку брать — по настройке «язык звука при скачивании».
+         *
+         * Названная человеком (при ладе «спрашивать каждый раз») старше
+         * правила: он уже ответил на тот же вопрос.
+         */
+        val wantedTrack = item.audioTrack?.takeIf { it.isNotEmpty() }
+            ?: Streams.trackIdForMode(Settings.downloadAudioLanguage, player)
+
+        val sabr = Streams.detachedSabrFor(player, item.height, wantedTrack)
 
         if (sabr != null) {
             return fromSabr(item, sabr, target)

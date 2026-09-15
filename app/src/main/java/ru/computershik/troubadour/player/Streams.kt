@@ -4,6 +4,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import ru.computershik.troubadour.Log
 import ru.computershik.troubadour.Notify
+import ru.computershik.troubadour.AudioLanguage
 import ru.computershik.troubadour.Settings
 import ru.computershik.troubadour.net.Api
 import ru.computershik.troubadour.net.Http
@@ -320,6 +321,187 @@ object Streams {
         return false
     }
 
+    /**
+     * Синтезированный дубляж — голос машины поверх родного.
+     *
+     * Пометка `acont=dubbed-auto`; у озвучки, записанной людьми, стоит
+     * просто `dubbed`. Разница для слуха велика, и человек вправе сказать
+     * «чужой язык — да, робота — нет».
+     *
+     * Запасной ход по названию: сервер переводит его на язык запроса,
+     * и «(автоматический дубляж)» по-русски рядом с «(auto-dubbed)»
+     * по-английски несут одно слово, по которому и смотрим.
+     */
+    fun isAutoDubbedTrack(format: JSONObject): Boolean {
+        val marks = marksIn(format)
+
+        if (marks.contains("dubbed-auto")) {
+            return true
+        }
+
+        if (marks.contains("acont")) {
+            return false
+        }
+
+        val name = audioTrackField(format, "displayName") ?: return false
+
+        return name.contains("auto", true) || name.contains("автомат", true)
+    }
+
+    /**
+     * Язык дорожки двумя буквами.
+     *
+     * Берётся из `id` — он выглядит как «ru.4» или «en-US.4», где до
+     * точки стоит код языка. Запасной ход — пометка `lang=` в `xtags`.
+     */
+    fun languageOfTrack(format: JSONObject): String {
+        val identifier = audioTrackField(format, "id")
+
+        if (!identifier.isNullOrEmpty()) {
+            val head = identifier.substringBefore('.')
+
+            if (head.isNotEmpty()) {
+                return shortLanguage(head)
+            }
+        }
+
+        val marks = marksIn(format)
+        val at = marks.indexOf("lang=")
+
+        if (at < 0) {
+            return ""
+        }
+
+        val tail = marks.substring(at + 5)
+
+        return shortLanguage(tail.takeWhile { it.isLetter() || it == '-' })
+    }
+
+    /** «en-US» и «en_GB» — это один и тот же «en». */
+    fun shortLanguage(code: String?): String {
+        if (code.isNullOrEmpty()) {
+            return ""
+        }
+
+        return code.substringBefore('-').substringBefore('_').lowercase()
+    }
+
+    /**
+     * Дорожки, сведённые к тому, что нужно для выбора языка.
+     *
+     * Сам выбор ниже один на оба разбора; здесь только приведение
+     * к общему виду.
+     */
+    class TrackFact(
+        val id: String,
+        val language: String,
+        val original: Boolean,
+        val automatic: Boolean,
+        val compressed: Boolean
+    )
+
+    fun trackFactsIn(formats: JSONArray?): List<TrackFact> {
+        val facts = ArrayList<TrackFact>()
+        val seen = HashSet<String>()
+
+        if (formats == null) {
+            return facts
+        }
+
+        for (index in 0 until formats.length()) {
+            val format = formats.opt(index) as? JSONObject ?: continue
+
+            val identifier = audioTrackField(format, "id")
+
+            if (identifier.isNullOrEmpty() || !seen.add(identifier)) {
+                continue
+            }
+
+            facts.add(
+                TrackFact(
+                    identifier,
+                    languageOfTrack(format),
+                    isOriginalTrack(format),
+                    isAutoDubbedTrack(format),
+                    isCompressed(format)
+                )
+            )
+        }
+
+        return facts
+    }
+
+    /**
+     * Само правило: по порядку предпочтений.
+     *
+     * Родная на нужном языке лучше озвучки на нём же — у ролика, снятого
+     * по-русски, русская «озвучка» была бы переводом с перевода.
+     *
+     * Заходов три: родная на языке устройства, человеческая озвучка на
+     * нём же и — только если автодубляж разрешён — машинная. Ни один
+     * не сошёлся, значит родная, и называем её прямо: пустота увела бы
+     * в общий запасной ход, а он у подачи и у склейки разный.
+     */
+    fun pickTrackForMode(mode: Int, facts: List<TrackFact>): String? {
+        // Дорожка одна — выбирать не из чего, и называть её незачем.
+        if (facts.size < 2) {
+            return null
+        }
+
+        val want = shortLanguage(Api.hl())
+
+        val byDevice = mode == AudioLanguage.DEVICE_AUTHORED ||
+            mode == AudioLanguage.DEVICE_ANY
+
+        var pass = 0
+
+        while (byDevice && want.isNotEmpty() && pass < 3) {
+            // Третий заход — автодубляж, и только если его разрешили.
+            if (pass == 2 && mode != AudioLanguage.DEVICE_ANY) {
+                break
+            }
+
+            for (track in facts) {
+                if (track.language != want || track.compressed) {
+                    continue
+                }
+
+                val fits = when (pass) {
+                    0 -> track.original
+                    1 -> !track.automatic
+                    else -> true
+                }
+
+                if (fits) {
+                    return track.id
+                }
+            }
+
+            pass += 1
+        }
+
+        for (track in facts) {
+            if (track.original && !track.compressed) {
+                return track.id
+            }
+        }
+
+        return null
+    }
+
+    /** Дорожка по настройке — либо null, когда выбирать не из чего. */
+    fun trackIdForMode(mode: Int, playerResponse: JSONObject?): String? {
+        if (mode == AudioLanguage.ASK) {
+            return null
+        }
+
+        val formats = Json.array(
+            Json.obj(playerResponse, "streamingData"), "adaptiveFormats"
+        )
+
+        return pickTrackForMode(mode, trackFactsIn(formats))
+    }
+
     /** Помечена ли дорожка основной — или у неё вовсе нет озвучек. */
     private fun isDefaultTrack(format: JSONObject): Boolean {
         val track = Json.obj(format, "audioTrack") ?: return true
@@ -506,6 +688,20 @@ object Streams {
          */
         val nativeVoice = hasOriginalTrack(adaptive)
 
+        /**
+         * Чего просит настройка, когда человек сам дорожку не называл.
+         *
+         * Правило одно на всё приложение и живёт в [pickTrackForMode];
+         * здесь только его ответ. Пусто — правилу выбирать не из чего
+         * (дорожка одна) либо стоит «спрашивать каждый раз», и тогда
+         * остаётся прежний ход: родная, а нет родной — основная.
+         */
+        val byRule = if (sabrTrack.isNullOrEmpty()) {
+            pickTrackForMode(Settings.playbackAudioLanguage, trackFactsIn(adaptive))
+        } else {
+            null
+        }
+
         var video: JSONObject? = null
         var lowest: JSONObject? = null
         var audio: JSONObject? = null
@@ -645,6 +841,8 @@ object Streams {
                      */
                     val wanted = if (!sabrTrack.isNullOrEmpty()) {
                         identifier == sabrTrack
+                    } else if (!byRule.isNullOrEmpty()) {
+                        identifier == byRule
                     } else if (nativeVoice) {
                         isOriginalTrack(format) && !isCompressed(format)
                     } else {
@@ -875,7 +1073,11 @@ object Streams {
      * загрузка, начатая во время просмотра, подменяла бы плееру и меню
      * качества, и перечень озвучек — от другого ролика.
      */
-    fun detachedSabrFor(playerResponse: JSONObject, maxHeight: Int): Sabr? {
+    fun detachedSabrFor(
+        playerResponse: JSONObject,
+        maxHeight: Int,
+        audioTrack: String? = null
+    ): Sabr? {
         synchronized(this) {
             val keepSabr = lastSabr
             val keepHeights = lastSabrHeights
@@ -885,7 +1087,7 @@ object Streams {
             val keepTrack = sabrTrack
             val keepExact = sabrExact
 
-            val fresh = sabrFor(playerResponse, maxHeight, null, true)
+            val fresh = sabrFor(playerResponse, maxHeight, audioTrack, true)
 
             lastSabr = keepSabr
             lastSabrHeights = keepHeights

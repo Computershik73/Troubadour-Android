@@ -30,6 +30,25 @@ object Delivery {
 }
 
 /**
+ * Какую звуковую дорожку брать, когда их у ролика несколько.
+ *
+ * [ORIGINAL] — всегда родная, та, на которой ролик сняли.
+ *
+ * [DEVICE_AUTHORED] — на языке устройства, но только если её записал сам
+ *     автор: синтезированный дубляж не берём. Нет авторской — оригинал.
+ *
+ * [DEVICE_ANY] — на языке устройства любая, включая машинный дубляж.
+ *
+ * [ASK] — спрашивать каждый раз, когда дорожек больше одной.
+ */
+object AudioLanguage {
+    const val ORIGINAL = 0
+    const val DEVICE_AUTHORED = 1
+    const val DEVICE_ANY = 2
+    const val ASK = 3
+}
+
+/**
  * Настройки приложения — порт `Settings.xaml` из версии для Windows 10 Mobile
  * и его хранилища.
  *
@@ -57,6 +76,8 @@ object Settings {
     private const val SHORTS_HEIGHT = "YTShortsHeight"
     private const val THUMBNAIL_WIDTH = "YTThumbnailWidth"
     private const val DELIVERY = "YTDelivery"
+    private const val DOWNLOAD_AUDIO_LANGUAGE = "YTDownloadAudioLanguage"
+    private const val PLAYBACK_AUDIO_LANGUAGE = "YTPlaybackAudioLanguage"
     private const val CHANNEL_ICONS = "YTChannelIcons"
     private const val AUTO_FULLSCREEN = "YTAutoFullscreen"
     private const val PO_AUTO = "po_auto"
@@ -321,6 +342,73 @@ object Settings {
         }
 
     val deliveryOptions: List<Int> = listOf(Delivery.SABR, Delivery.ANDROID_VR)
+
+    // --- Язык звука -------------------------------------------------------
+
+    /**
+     * Ноль в хранилище означает «не выбирали», а не «оригинал»: у пустых
+     * настроек целое всегда ноль, и отличить одно от другого нельзя.
+     * Поэтому наружу значения сдвинуты на единицу — внутри лежит
+     * `режим + 1`, и ноль честно читается как «ничего не выбрано».
+     */
+    private fun audioLanguageFor(key: String): Int {
+        val stored = store.getInt(key, 0)
+
+        if (stored < 1 || stored > AudioLanguage.ASK + 1) {
+            return AudioLanguage.DEVICE_AUTHORED
+        }
+
+        return stored - 1
+    }
+
+    private fun setAudioLanguage(key: String, mode: Int) {
+        store.edit().putInt(key, mode + 1).apply()
+
+        changed()
+    }
+
+    var downloadAudioLanguage: Int
+        get() = audioLanguageFor(DOWNLOAD_AUDIO_LANGUAGE)
+        set(value) = setAudioLanguage(DOWNLOAD_AUDIO_LANGUAGE, value)
+
+    var playbackAudioLanguage: Int
+        get() = audioLanguageFor(PLAYBACK_AUDIO_LANGUAGE)
+        set(value) = setAudioLanguage(PLAYBACK_AUDIO_LANGUAGE, value)
+
+    val audioLanguageOptions: List<Int> = listOf(
+        AudioLanguage.ORIGINAL,
+        AudioLanguage.DEVICE_AUTHORED,
+        AudioLanguage.DEVICE_ANY,
+        AudioLanguage.ASK
+    )
+
+    fun audioLanguageTitle(mode: Int): String = when (mode) {
+        AudioLanguage.ORIGINAL -> loc("Оригинал")
+        AudioLanguage.DEVICE_AUTHORED -> loc("Язык устройства")
+        AudioLanguage.ASK -> loc("Спрашивать каждый раз")
+        else -> loc("Язык устройства, можно автодубляж")
+    }
+
+    fun audioLanguageHint(mode: Int): String = when (mode) {
+        AudioLanguage.ORIGINAL ->
+            loc("Та дорожка, на которой ролик сняли")
+
+        AudioLanguage.DEVICE_AUTHORED ->
+            loc(
+                "Озвучка на языке устройства, если её записал сам автор. " +
+                    "Синтезированный дубляж не берём; нет авторской — " +
+                    "играет оригинал"
+            )
+
+        AudioLanguage.ASK ->
+            loc("Выбор дорожки при каждом ролике, у которого их больше одной")
+
+        else ->
+            loc(
+                "Любая дорожка на языке устройства, в том числе " +
+                    "автоматический дубляж. Нет ни одной — играет оригинал"
+            )
+    }
 
     fun deliveryTitle(delivery: Int): String =
         if (delivery == Delivery.ANDROID_VR) loc("Готовые адреса") else loc("Подача SABR")

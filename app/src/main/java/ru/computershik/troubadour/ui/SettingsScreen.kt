@@ -86,15 +86,38 @@ class SettingsScreen(context: Context) : Screen(context) {
             ThemeSheet(context).show()
         }
 
+        /**
+         * Языковое — своим разделом.
+         *
+         * Язык надписей, язык ответов сервера и язык звука отвечают
+         * на один и тот же вопрос «на каком языке», и разносить их
+         * по «Оформлению» и «Видео» значило бы прятать половину.
+         */
+        group(loc("Язык"))
+
         pick("languages_light", loc("Язык приложения"), Strings.title(Settings.interfaceLanguage)) {
             InterfaceLanguageSheet(context).show()
         }
 
-        group(loc("Видео"))
-
         pick("languages_light", loc("Язык YouTube"), Settings.languageTitle(Settings.language)) {
             LanguageSheet(context).show()
         }
+
+        pick(
+            "languages_light", loc("Язык звука при просмотре"),
+            Settings.audioLanguageTitle(Settings.playbackAudioLanguage)
+        ) {
+            AudioLanguageSheet(context, false).show()
+        }
+
+        pick(
+            "languages_light", loc("Язык звука при скачивании"),
+            Settings.audioLanguageTitle(Settings.downloadAudioLanguage)
+        ) {
+            AudioLanguageSheet(context, true).show()
+        }
+
+        group(loc("Видео"))
 
         pick("pl_quality_light", loc("Предпочитаемое качество"), Settings.qualityTitle(Settings.preferredHeight)) {
             HeightSheet(context, false).show()
@@ -445,6 +468,43 @@ class ThumbnailSheet(context: Context) : Sheet(context, loc("Качество п
             add(
                 row(Settings.thumbnailTitle(width), null, width == Settings.thumbnailWidth) {
                     Settings.thumbnailWidth = width
+                }
+            )
+        }
+    }
+}
+
+/**
+ * Какую озвучку брать — отдельно для просмотра и для скачивания.
+ *
+ * Лады у обоих одни и те же, поэтому лист один, а [forDownload]
+ * говорит, чью настройку он правит.
+ */
+class AudioLanguageSheet(context: Context, private val forDownload: Boolean) :
+    Sheet(
+        context,
+        if (forDownload) loc("Язык звука при скачивании") else loc("Язык звука при просмотре")
+    ) {
+
+    init {
+        val now = if (forDownload) {
+            Settings.downloadAudioLanguage
+        } else {
+            Settings.playbackAudioLanguage
+        }
+
+        for (mode in Settings.audioLanguageOptions) {
+            add(
+                row(
+                    Settings.audioLanguageTitle(mode),
+                    Settings.audioLanguageHint(mode),
+                    mode == now
+                ) {
+                    if (forDownload) {
+                        Settings.downloadAudioLanguage = mode
+                    } else {
+                        Settings.playbackAudioLanguage = mode
+                    }
                 }
             )
         }

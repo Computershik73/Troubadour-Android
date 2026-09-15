@@ -12,6 +12,8 @@ import android.view.Window
 import android.view.WindowManager
 import android.widget.ImageView
 import android.widget.ScrollView
+import ru.computershik.troubadour.AudioLanguage
+import ru.computershik.troubadour.Settings
 import ru.computershik.troubadour.loc
 import ru.computershik.troubadour.net.Account
 import ru.computershik.troubadour.net.Api
@@ -1175,7 +1177,51 @@ class DownloadQualitySheet(
                         "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
                     item.height = height
 
+                    /**
+                     * «Спрашивать каждый раз» — спрашиваем и тут.
+                     *
+                     * Дорожки берём у плеера: ответ `/player` для этого
+                     * ролика уже разобран, и второй запрос ради перечня
+                     * был бы лишним. Дорожка одна — спрашивать не о чем.
+                     */
+                    val tracks = PlayerEngine.audioTracks()
+
+                    if (Settings.downloadAudioLanguage == AudioLanguage.ASK &&
+                        tracks.size > 1
+                    ) {
+                        DownloadAudioSheet(context, tracks) { chosen ->
+                            item.audioTrack = chosen
+
+                            ru.computershik.troubadour.net.Downloads.enqueue(item)
+                        }.show()
+
+                        return@row
+                    }
+
                     ru.computershik.troubadour.net.Downloads.enqueue(item)
+                }
+            )
+        }
+    }
+}
+
+/**
+ * Какую озвучку скачать — при ладе «спрашивать каждый раз».
+ *
+ * Отдельный лист, а не [AudioMenu]: тот переключает дорожку у идущего
+ * воспроизведения, а здесь ответ нужен не плееру, а очереди загрузок.
+ */
+class DownloadAudioSheet(
+    context: Context,
+    tracks: List<ru.computershik.troubadour.player.AudioTrack>,
+    onPick: (String) -> Unit
+) : Sheet(context, loc("Язык звука при скачивании")) {
+
+    init {
+        for (track in tracks) {
+            add(
+                row(track.title, null, track.isDefault) {
+                    onPick(track.id)
                 }
             )
         }

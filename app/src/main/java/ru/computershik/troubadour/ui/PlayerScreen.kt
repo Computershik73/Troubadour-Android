@@ -14,6 +14,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import ru.computershik.troubadour.Log
 import ru.computershik.troubadour.Notify
+import ru.computershik.troubadour.AudioLanguage
 import ru.computershik.troubadour.Settings
 import ru.computershik.troubadour.loc
 import ru.computershik.troubadour.locF
@@ -151,6 +152,9 @@ class PlayerScreen(
 
     /** Похожие держим у себя: при смене раскладки их перекладывают заново. */
     private var relatedItems: List<VideoItem> = emptyList()
+
+    /** Спрашивали ли уже про озвучку у этого ролика. */
+    private var askedAudioTrack = false
 
     companion object {
         /**
@@ -1036,7 +1040,35 @@ class PlayerScreen(
         load()
     }
 
+    /**
+     * «Спрашивать каждый раз» — открываем список дорожек, когда их
+     * несколько.
+     *
+     * Вопрос задаётся после пуска, а не до: до пуска у нас ещё нет
+     * ответа `/player`, а значит и перечня дорожек, — пришлось бы
+     * задерживать показ ради лишнего запроса у каждого ролика, в том
+     * числе одноязычного. Выбранная дорожка подхватывается на ходу, тем
+     * же путём, что и выбор из меню вручную.
+     */
+    private fun askAudioTrackIfAsked() {
+        if (askedAudioTrack ||
+            Settings.playbackAudioLanguage != AudioLanguage.ASK
+        ) {
+            return
+        }
+
+        if (PlayerEngine.audioTracks().size < 2) {
+            return
+        }
+
+        askedAudioTrack = true
+
+        AudioMenu(context).show()
+    }
+
     private fun load() {
+        askedAudioTrack = false
+
         stage.setBusy(true)
 
         // Прежний кадр прячем: иначе он висит «отпечатком» до первого нового.
@@ -1625,7 +1657,11 @@ class PlayerScreen(
             }
         }
 
-        Notify.on(PlayerEngine.FIRST_FRAME, this) { stage.showFrame() }
+        Notify.on(PlayerEngine.FIRST_FRAME, this) {
+            stage.showFrame()
+
+            askAudioTrackIfAsked()
+        }
 
         /**
          * Поворот сам разворачивает кадр на весь экран.
