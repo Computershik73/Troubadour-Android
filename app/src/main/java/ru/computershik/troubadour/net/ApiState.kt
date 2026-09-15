@@ -588,6 +588,29 @@ private fun Api.pingStats(url: String) {
  * и приписывается. Без входа не делается ничего.
  */
 fun Api.reportWatched(playerResponse: JSONObject?, position: Double) {
+    reportWatched(playerResponse, position, -1.0, 0.0, false)
+}
+
+/**
+ * Отрезок просмотра: отсюда, досюда, столько прошло.
+ *
+ * Настоящий TV-клиент не отмечает ролик одной точкой — он ведёт
+ * непрерывную запись. В дампе телевизора пятнадцать обращений
+ * к `watchtime` за сессию: первые три через десять секунд, дальше через
+ * сорок, и в каждом `st` равен `et` предыдущего. Так сервер складывает
+ * из отрезков всю дорожку просмотра, а не одну отметку у нулевой
+ * секунды — и от неё же потом считается доля просмотренного, та самая,
+ * что рисуется полоской на карточке.
+ *
+ * [from] меньше нуля означает «отрезка нет» — начало показа.
+ */
+fun Api.reportWatched(
+    playerResponse: JSONObject?,
+    position: Double,
+    from: Double,
+    elapsed: Double,
+    final: Boolean
+) {
     if (!Auth.isSignedIn()) {
         return
     }
@@ -618,8 +641,13 @@ fun Api.reportWatched(playerResponse: JSONObject?, position: Double) {
         "&cos=Tizen&cosver=5.0&cplatform=TV&ctheme=CLASSIC&hl=${hl()}&cr=${gl()}"
 
     val at = maxOf(position, 0.0)
+    val opening = from < 0
 
-    if (!playback.isNullOrEmpty()) {
+    /**
+     * Сигнал `playback` — только при начале показа: он открывает запись,
+     * и повторять его на каждом отрезке незачем.
+     */
+    if (opening && !playback.isNullOrEmpty()) {
         pingStats(String.format(Locale.US, "%s%s&cmt=%.3f", playback, common, at))
     }
 
@@ -629,12 +657,20 @@ fun Api.reportWatched(playerResponse: JSONObject?, position: Double) {
          * какой отрезок посмотрели. Нулевой отрезок не считается, поэтому
          * у самого начала берётся секунда.
          */
-        val end = if (at > 0) at else 1.0
+        val begin = if (opening) 0.0 else maxOf(from, 0.0)
+
+        var end = maxOf(at, begin)
+
+        if (opening && end <= begin) {
+            end = begin + 1.0
+        }
+
+        val spent = if (opening) end else maxOf(elapsed, 0.0)
 
         val url = StringBuilder(
             String.format(
-                Locale.US, "%s%s&cmt=%.3f&st=0&et=%.3f&rt=%.3f",
-                watchtime, common, at, end, end
+                Locale.US, "%s%s&cmt=%.3f&st=%.3f&et=%.3f&rt=%.3f",
+                watchtime, common, at, begin, end, spent
             )
         )
 
@@ -642,8 +678,25 @@ fun Api.reportWatched(playerResponse: JSONObject?, position: Double) {
             url.append(String.format(Locale.US, "&len=%.3f", length))
         }
 
+        /**
+         * `final=1` у последнего отрезка.
+         *
+         * В дампе его нет, и это не довод против: дамп снят с эфира,
+         * который не кончается, — там все обращения идут со
+         * `state=playing` и без признака конца. Признак этот у сигналов
+         * YouTube означает «запись закрыта, больше по этому показу
+         * ничего не будет».
+         */
+        if (final) {
+            url.append("&final=1")
+        }
+
         pingStats(url.toString())
     }
 
-    Log.d { "[YouTube/История] $videoId отмечен на ${at.toInt()} с" }
+    Log.d {
+        "[YouTube/История] $videoId: отрезок ${(if (opening) 0.0 else maxOf(from, 0.0)).toInt()}…" +
+            "${at.toInt()} с, показ на ${at.toInt()} с" +
+            (if (final) ", запись закрыта" else "")
+    }
 }

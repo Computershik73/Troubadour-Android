@@ -357,6 +357,8 @@ object PlayerEngine {
         playerJson = null
         readyHeight = 0
         seekedTo = if (startAt > 0) startAt else -1.0
+
+        startWatchReports()
         seekedAt = android.os.SystemClock.uptimeMillis()
 
         async { loadStreams(videoId, mark, startAt) }
@@ -1213,27 +1215,74 @@ object PlayerEngine {
     }
 
     /**
-     * Отметка о просмотре — раз в тридцать секунд и при уходе.
+     * Запись просмотра ведётся отрезками, пока ролик идёт.
      *
      * Отдельного запроса «добавить в историю» у InnerTube нет вовсе:
      * YouTube считает просмотр по служебным сигналам, адреса для которых
-     * лежат в самом ответе `/player`.
+     * лежат в самом ответе `/player`. Настоящий TV-клиент шлёт их
+     * непрерывно: первые три отметки через десять секунд, дальше через
+     * сорок, и конец каждого отрезка становится началом следующего.
+     * Реже нельзя: оборвись показ между отметками, потерянным окажется
+     * весь промежуток.
      */
     private var reportedAt = 0L
+    private var watchSegmentFrom = -1.0
+    private var watchSegmentAt = 0L
+    private var watchPings = 0
 
     private fun reportIfDue() {
         val now = System.currentTimeMillis()
 
-        if (reportedAt > 0 && now - reportedAt < 30000) {
+        // Первые три отрезка — по десять секунд, дальше по сорок.
+        val every = if (watchPings < 3) 10000L else 40000L
+
+        if (reportedAt > 0 && now - reportedAt < every) {
             return
         }
 
         reportedAt = now
+        watchPings += 1
 
+        sendWatchSegment(false)
+    }
+
+    /** Отрезок от прошлой отметки до нынешнего места показа. */
+    private fun sendWatchSegment(final: Boolean) {
         val json = playerJson ?: return
-        val at = position()
 
-        async { Api.reportWatched(json, at) }
+        var at = position()
+
+        if (at <= 0) {
+            at = maxOf(watchSegmentFrom, 0.0)
+        }
+
+        val now = System.currentTimeMillis()
+
+        val spent = if (watchSegmentAt > 0) {
+            maxOf(0.0, (now - watchSegmentAt) / 1000.0)
+        } else {
+            0.0
+        }
+
+        val from = watchSegmentFrom
+
+        // Отрезок короче полусекунды не отмечаем — кроме последнего.
+        if (!final && from >= 0 && at <= from + 0.5) {
+            return
+        }
+
+        watchSegmentFrom = at
+        watchSegmentAt = now
+
+        async { Api.reportWatched(json, at, from, spent, final) }
+    }
+
+    /** Новый показ — запись начинается сначала. */
+    private fun startWatchReports() {
+        reportedAt = 0
+        watchSegmentFrom = -1.0
+        watchSegmentAt = System.currentTimeMillis()
+        watchPings = 0
     }
 
     /**
@@ -1322,6 +1371,9 @@ object PlayerEngine {
             Notify.post(STATE, state)
 
             if (state == Player.STATE_ENDED) {
+                // Ролик доигран — закрываем запись просмотра последним отрезком.
+                sendWatchSegment(true)
+
                 Notify.post(STATE, state)
             }
         }
@@ -1548,11 +1600,8 @@ object PlayerEngine {
     fun release() {
         stopTicker()
 
-        playerJson?.let { json ->
-            val at = position()
-
-            async { Api.reportWatched(json, at) }
-        }
+        // Уходим с ролика — закрываем запись последним отрезком.
+        sendWatchSegment(true)
 
         player?.release()
         player = null
