@@ -769,7 +769,20 @@ class QualityMenu(context: Context) : Sheet(context, loc("В каком каче
         for (height in heights.sortedDescending()) {
             var title = "${height}p" + framesSuffix(height)
 
-            if (Streams.isBeyondDevice(height)) {
+            /**
+             * Предупреждаем, но не прячем.
+             *
+             * Потолок железа — это заявление декодера об уровне H.264,
+             * а не приговор: на C6833 декодер объявляет уровень 4.x,
+             * и 1080p60 в него не укладывается, хотя пропускной
+             * способности у чипа заявлено вчетверо больше. Потянет ли он
+             * на деле — узнаётся попыткой, и право на неё остаётся
+             * за человеком.
+             */
+            val beyondFrames = Streams.framesForHeight(height) > 30 &&
+                height > Streams.sixtyCap()
+
+            if (Streams.isBeyondDevice(height) || beyondFrames) {
                 title += loc(" — может не пойти")
             }
 

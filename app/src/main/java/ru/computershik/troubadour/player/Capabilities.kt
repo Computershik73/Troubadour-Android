@@ -234,6 +234,30 @@ object Capabilities {
             if (sixtyBest > 0) {
                 sixty = true
             }
+
+            /**
+             * Что ответил каждый декодер — в журнал.
+             *
+             * Ответы у них разные, и когда потолок выходит не тот, какого
+             * ждёшь, спорить об этом надо не на память: здесь видно и имя
+             * декодера, и его предельный размер, и то, что он сказал
+             * про шестьдесят кадров на каждой ступени.
+             */
+            Log.d {
+                val said = intArrayOf(2160, 1440, 1080, 720).joinToString(", ") { tier ->
+                    val yes = try {
+                        video.areSizeAndRateSupported(tier * 16 / 9, tier, 60.0)
+                    } catch (error: Throwable) {
+                        false
+                    }
+
+                    "${tier}p60 ${if (yes) "да" else "нет"}"
+                }
+
+                "[YouTube/Декодер] ${info.name}: до ${video.supportedWidths.upper}" +
+                    "×${video.supportedHeights.upper}, кадров до " +
+                    "${video.supportedFrameRates.upper}; $said"
+            }
         }
 
         if (best > 0) {

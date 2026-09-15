@@ -802,13 +802,38 @@ object Streams {
                         continue
                     }
 
-                    if (Json.int(format, "fps") > 31 &&
-                        (prefersThirtyFrames() || tier > sixtyCap())
-                    ) {
+                    val sixty = Json.int(format, "fps") > 31
+
+                    if (sixty && prefersThirtyFrames()) {
                         continue
                     }
 
-                    if (tier <= sabrCap && (video == null || tier > tierIn(video))) {
+                    /**
+                     * Выше потолка железа — только по прямой просьбе.
+                     *
+                     * Отсюда берётся и ступень, которую мы называем подаче
+                     * (поле 21). Пропусти её здесь — и сервер услышит
+                     * «хочу 720p», сколько бы дорожек мы ему потом
+                     * ни перечислили: он отдаёт названное, а не наибольшее
+                     * из возможного.
+                     */
+                    if (sixty && tier > sixtyCap() && !(sabrExact && tier <= sabrCap)) {
+                        continue
+                    }
+
+                    /**
+                     * При равной ступени берём ту, что с кадрами выше.
+                     *
+                     * У 720p бывают обе дорожки — 136 (30 кадров) и 298
+                     * (60), — и прежний отбор оставлял ту, что попалась
+                     * первой. Попадалась тридцатикадровая, и названная
+                     * подаче ступень выходила от неё.
+                     */
+                    val better = video == null || tier > tierIn(video) ||
+                        (tier == tierIn(video) &&
+                            Json.int(format, "fps") > Json.int(video, "fps"))
+
+                    if (tier <= sabrCap && better) {
                         video = format
                     }
 
@@ -878,18 +903,40 @@ object Streams {
 
                     ladder.add(Pair(tier, Json.int(format, "fps")))
 
-                    // То же правило, что и при выборе: шестидесятикадровых
-                    // на слабом железе не предлагаем и серверу.
-                    if (Json.int(format, "fps") > 31 &&
-                        (prefersThirtyFrames() || tier > sixtyCap())
-                    ) {
+                    val sixty = Json.int(format, "fps") > 31
+
+                    // Тумблер выключен — шестидесятикадровых нет вовсе.
+                    if (sixty && prefersThirtyFrames()) {
                         continue
                     }
+
+                    /**
+                     * Выше потолка железа ступень **показываем**, но сами
+                     * не берём.
+                     *
+                     * Потолок этот — не приговор, а заявление декодера:
+                     * он объявляет уровень H.264, а из уровня следует
+                     * предел «столько макроблоков в секунду». На C6833
+                     * это уровень 4.x — 1080p там разрешён при тридцати
+                     * кадрах, а при шестидесяти нет, хотя пропускной
+                     * способности у чипа заявлено вчетверо больше.
+                     * Потянет он на деле или нет — узнаётся только
+                     * попыткой, и право на неё остаётся за человеком.
+                     *
+                     * Поэтому сама подача такую ступень не просит: её
+                     * отдают только когда ступень названа прямо
+                     * ([sabrExact]).
+                     */
+                    val beyond = sixty && tier > sixtyCap()
 
                     if (tier > 0) {
                         tiers.add(tier)
 
                         sabrTiers[Json.int(format, "itag")] = tier
+                    }
+
+                    if (beyond && !(sabrExact && tier <= sabrCap)) {
+                        continue
                     }
 
                     if (tier <= sabrCap) {
@@ -1521,7 +1568,18 @@ object Streams {
              */
             val tier = format.qualityTier()
 
-            if (format.fps > 31 && (prefersThirtyFrames() || tier > sixtyCap())) {
+            if (format.fps > 31 && prefersThirtyFrames()) {
+                continue
+            }
+
+            /**
+             * Выше потолка железа берём только по прямой просьбе.
+             *
+             * `maxHeight` здесь и есть просьба: в ладе «Авто» он либо
+             * ноль, либо потолок настройки, и тогда угадывать за человека
+             * не станем.
+             */
+            if (format.fps > 31 && tier > sixtyCap() && maxHeight != tier) {
                 continue
             }
 
