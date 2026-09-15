@@ -156,6 +156,25 @@ class PlayerScreen(
     /** Спрашивали ли уже про озвучку у этого ролика. */
     private var askedAudioTrack = false
 
+    /**
+     * Очередь подборки — та, что показана карточкой.
+     *
+     * Держим её отдельно от карточки: по ней ищется следующий ролик,
+     * когда нынешний доиграл, а спрашивать об этом вид, который её
+     * рисует, значило бы заставить его отвечать не о своём деле.
+     */
+    private var queueItems: List<VideoItem> = emptyList()
+
+    /**
+     * С какого ролика уже перешли по концу.
+     *
+     * `STATE_ENDED` приходит не один раз — плеер рассылает его и сам,
+     * и вслед за закрытием записи просмотра. Без этой отметки второй
+     * приход уводил бы на ролик через один: первый переход уже сменил
+     * [videoId], и следующим в очереди оказывался бы уже другой.
+     */
+    private var advancedFrom: String? = null
+
     // --- Ожидание объявленной трансляции ---------------------------------
 
     /**
@@ -1194,6 +1213,44 @@ class PlayerScreen(
     }
 
     /**
+     * Следующий ролик очереди, когда нынешний доиграл.
+     *
+     * Только внутри подборки: одиночный ролик ни во что не переходит —
+     * в этом приложении нет «автовоспроизведения похожих», и подсовывать
+     * человеку что попало незачем.
+     *
+     * У микса очередь к этому времени уже дописана: она растёт, когда
+     * играет последний в ней ролик, — то есть как раз сейчас. Без этого
+     * перехода микс не рос вовсе: дорасти до конца можно было только
+     * тыкая в последнюю плитку руками.
+     */
+    private fun playNextInQueue() {
+        if (!Settings.autoplayNextInQueue || queueItems.isEmpty()) {
+            return
+        }
+
+        if (advancedFrom == videoId) {
+            return
+        }
+
+        advancedFrom = videoId
+
+        val place = queueItems.indexOfFirst { it.videoId == videoId }
+
+        if (place < 0 || place + 1 >= queueItems.size) {
+            Log.d { "[YouTube/Очередь] Ролик доиграл, следующего нет" }
+
+            return
+        }
+
+        val next = queueItems[place + 1]
+
+        Log.d { "[YouTube/Очередь] Ролик доиграл, включаем следующий: ${next.title}" }
+
+        openQueueItem(next)
+    }
+
+    /**
      * «Спрашивать каждый раз» — открываем список дорожек, когда их
      * несколько.
      *
@@ -1221,6 +1278,7 @@ class PlayerScreen(
 
     private fun load() {
         askedAudioTrack = false
+        advancedFrom = null
 
         stopBroadcastWait()
 
@@ -1311,8 +1369,10 @@ class PlayerScreen(
             ru.computershik.troubadour.player.Chapters.titleAt(chapters, at)
         }
 
+        queueItems = JamQueue.merge(playlistId, videoId, page.queue)
+
         queueCard.bind(
-            JamQueue.merge(playlistId, videoId, page.queue),
+            queueItems,
             page.queueTitle,
             page.queueIndex,
             videoId
@@ -1786,6 +1846,10 @@ class PlayerScreen(
             NowPlaying.update()
 
             val state = it as? Int
+
+            if (state == com.google.android.exoplayer2.Player.STATE_ENDED) {
+                playNextInQueue()
+            }
 
             stage.setBusy(state == com.google.android.exoplayer2.Player.STATE_BUFFERING)
 
