@@ -571,6 +571,12 @@ class HistoryTile(context: Context) : TappableView(context) {
     private val title = label(context, Fonts.regular, 13f, Theme.primaryText, 2)
     private val subtitle = label(context, Fonts.regular, 11f, Theme.secondaryText, 1)
 
+    /** Полоска просмотра по нижнему краю кадра — та же, что у карточек ленты. */
+    private val watchedTrack = View(context)
+    private val watchedFill = View(context)
+
+    private var watchedShare = 0.0
+
     private var item: VideoItem? = null
 
     init {
@@ -581,6 +587,9 @@ class HistoryTile(context: Context) : TappableView(context) {
         thumb.cornerRadius = Metrics.dpf(Metrics.THUMB_RADIUS)
 
         addView(thumb)
+
+        addView(watchedTrack)
+        addView(watchedFill)
 
         // Плашка тут мельче, чем у карточки ленты: `Padding="4,1"` и 10 кегль.
         badge.padHorizontal = Metrics.dpf(4f)
@@ -599,7 +608,10 @@ class HistoryTile(context: Context) : TappableView(context) {
                 if (chosen.isPlaylist) {
                     Nav.openPlaylist(chosen.playlistId, chosen.title)
                 } else {
-                    Nav.openVideo(chosen.videoId, chosen.title)
+                    Nav.openVideo(
+                        chosen.videoId, chosen.title, null,
+                        maxOf(0.0, chosen.resumeAt)
+                    )
                 }
             }
         }
@@ -631,6 +643,20 @@ class HistoryTile(context: Context) : TappableView(context) {
          */
         badge.visibility = if (item.duration.isNullOrEmpty()) GONE else VISIBLE
 
+        watchedShare = if (item.isLive || item.isPlaylist) {
+            0.0
+        } else {
+            maxOf(0.0, item.watchedShare)
+        }
+
+        val showsBar = watchedShare > 0
+
+        watchedTrack.visibility = if (showsBar) VISIBLE else GONE
+        watchedFill.visibility = if (showsBar) VISIBLE else GONE
+
+        watchedTrack.setBackgroundColor(0x47FFFFFF)
+        watchedFill.setBackgroundColor(Theme.BRAND_RED)
+
         ImageLoader.loadInto(thumb, item.thumbnail, HISTORY_CARD)
 
         requestLayout()
@@ -658,6 +684,14 @@ class HistoryTile(context: Context) : TappableView(context) {
         val height = badge.badgeHeight()
 
         badge.frame(card - width - dp(4f), thumbHeight - height - dp(4f), width, height)
+
+        if (watchedTrack.visibility == VISIBLE) {
+            val bar = dp(4f)
+            val line = thumbHeight - bar
+
+            watchedTrack.frame(0, line, card, bar)
+            watchedFill.frame(0, line, (card * watchedShare).toInt(), bar)
+        }
 
         // `Margin="0,6,0,0"` у названия и `0,3,0,0` у подписи под ним.
         title.frame(0, thumbHeight + dp(6f), card, dp(34f))

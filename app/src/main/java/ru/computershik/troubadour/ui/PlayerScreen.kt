@@ -64,7 +64,13 @@ class PlayerScreen(
     context: Context,
     private var videoId: String,
     private var titleText: String,
-    private val playlistId: String?
+    private val playlistId: String?,
+    /**
+     * С какой секунды начать — по слову сервера с той карточки, откуда
+     * пришли. Ноль значит «сначала»; он же остаётся после перехода
+     * к следующему ролику в подборке.
+     */
+    private var startAt: Double = 0.0
 ) : Screen(context) {
 
     private lateinit var stage: PlayerStage
@@ -1005,6 +1011,7 @@ class PlayerScreen(
 
         videoId = id
         titleText = item.title ?: ""
+        startAt = maxOf(0.0, item.resumeAt)
 
         Log.d { "[YouTube/Очередь] Переходим к $id в подборке" }
 
@@ -1035,7 +1042,16 @@ class PlayerScreen(
         // Прежний кадр прячем: иначе он висит «отпечатком» до первого нового.
         stage.clearFrame()
 
-        PlayerEngine.open(videoId, playlistId)
+        PlayerEngine.open(videoId, playlistId, startAt)
+
+        /**
+         * Место продолжения — одноразовое.
+         *
+         * Оно верно ровно для того открытия, с которого пришли; перезапуск
+         * того же ролика кнопкой «Перезагрузить видео» должен начинать
+         * сначала, а не возвращать в ту же точку.
+         */
+        startAt = 0.0
 
         /**
          * Вставки SponsorBlock спрашиваются отдельным заходом.

@@ -39,6 +39,17 @@ class VideoCard(context: Context) : TappableView(context) {
     private val title = label(context, Fonts.medium, 14f, Theme.primaryText, 1)
     private val meta = label(context, Fonts.regular, 12f, Theme.mutedText, 1)
 
+    /**
+     * Полоска просмотра по нижнему краю превью — дорожка и заполненное.
+     *
+     * Простые крашеные виды: рисовать её в `onDraw` карточки значило бы
+     * перерисовывать карточку целиком ради четырёх точек по низу кадра.
+     */
+    private val watchedTrack = View(context)
+    private val watchedFill = View(context)
+
+    private var watchedShare = 0.0
+
     private var item: VideoItem? = null
 
     /**
@@ -59,6 +70,11 @@ class VideoCard(context: Context) : TappableView(context) {
 
     init {
         addView(thumb)
+
+        // Полоска ложится поверх кадра, но под плашку длительности.
+        addView(watchedTrack)
+        addView(watchedFill)
+
         addView(badge)
         addView(avatar)
         addView(title)
@@ -75,7 +91,10 @@ class VideoCard(context: Context) : TappableView(context) {
                 card == null -> Unit
                 card.isPlaylist -> Nav.openPlaylist(card.playlistId, card.title)
                 card.isShort -> Nav.openShort(card)
-                else -> Nav.openVideo(card.videoId, card.title, card.playlistId)
+                else -> Nav.openVideo(
+                    card.videoId, card.title, card.playlistId,
+                    maxOf(0.0, card.resumeAt)
+                )
             }
         }
 
@@ -124,6 +143,26 @@ class VideoCard(context: Context) : TappableView(context) {
 
         badge.text = card.duration ?: ""
         badge.visibility = if (badge.text.isEmpty()) GONE else VISIBLE
+
+        /**
+         * У эфира и у подборки полоски нет.
+         *
+         * У эфира её нечему мерить — конца у него не назначено; у
+         * подборки доля относилась бы к одному ролику из многих.
+         */
+        watchedShare = if (card.isLive || !card.playlistId.isNullOrEmpty()) {
+            0.0
+        } else {
+            maxOf(0.0, card.watchedShare)
+        }
+
+        val showsBar = watchedShare > 0
+
+        watchedTrack.visibility = if (showsBar) VISIBLE else GONE
+        watchedFill.visibility = if (showsBar) VISIBLE else GONE
+
+        watchedTrack.setBackgroundColor(0x47FFFFFF)
+        watchedFill.setBackgroundColor(Theme.BRAND_RED)
 
         val showsAvatar = Settings.showsChannelIcons && !card.channelThumbnail.isNullOrEmpty()
 
@@ -185,6 +224,19 @@ class VideoCard(context: Context) : TappableView(context) {
             width - dp(8f) - badgeWidth, thumbHeight - dp(8f) - badgeHeight,
             badgeWidth, badgeHeight
         )
+
+        /**
+         * Полоска просмотра — по нижнему краю кадра, в четыре точки,
+         * как в оригинале. Скруглению превью она не мешает: радиус
+         * небольшой, и полоска в него вписывается.
+         */
+        if (watchedTrack.visibility == VISIBLE) {
+            val bar = dp(4f)
+            val line = thumbHeight - bar
+
+            watchedTrack.frame(0, line, width, bar)
+            watchedFill.frame(0, line, (width * watchedShare).toInt(), bar)
+        }
 
         // Отступ 12 до строки с автором.
         val rowTop = thumbHeight + dp(12f)

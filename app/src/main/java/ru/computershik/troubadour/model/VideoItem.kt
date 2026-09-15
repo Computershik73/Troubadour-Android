@@ -51,6 +51,25 @@ class VideoItem {
     var isLive: Boolean = false
 
     /**
+     * Доля просмотренного от 0 до 1, как её сообщает сервер.
+     *
+     * Приходит в `thumbnailOverlayResumePlaybackRenderer` рядом со значком
+     * длительности: `percentDurationWatched`, целые проценты. Минус один —
+     * «сервер не сказал», и это не ноль: ноль был бы утверждением, что
+     * ролик не начинали.
+     */
+    var watchedShare: Double = -1.0
+
+    /**
+     * С какой секунды продолжать, по слову сервера.
+     *
+     * Приходит в `watchEndpoint.startTimeSeconds` у той же плитки, где
+     * лежит доля просмотра. Ноль — начинать сначала: так сервер отвечает
+     * и о недосмотренных с начала, и о досмотренных до конца.
+     */
+    var resumeAt: Double = 0.0
+
+    /**
      * Вертикальный ролик. Отмечается при разборе Shorts и нужен карточке:
      * у такого превью пропорция 9:16, и в место под 16:9 оно вписывалось
      * с обрезкой по бокам — от кадра оставалась узкая полоса посередине.
@@ -368,7 +387,47 @@ class VideoItem {
                 Json.thumbnail(tile, "channelThumbnailSupportedRenderers", 88)
                     ?: Json.thumbnail(tile, "channelThumbnail", 88)
 
+            item.watchedShare = watchedShareIn(tile)
+            item.resumeAt = resumeAtIn(tile)
+
             return item
+        }
+
+        /**
+         * Докуда досмотрено — по слову сервера.
+         *
+         * Лежит в тех же `thumbnailOverlays`, что и значок длительности:
+         * `thumbnailOverlayResumePlaybackRenderer.percentDurationWatched`,
+         * целыми процентами. Слову сервера верим больше своей записи:
+         * оно знает и о просмотрах с других устройств.
+         *
+         * Минус один означает «не сказано».
+         */
+        private fun watchedShareIn(renderer: JSONObject?): Double {
+            val resume = Json.findFirst(
+                "thumbnailOverlayResumePlaybackRenderer", renderer, 600
+            ) ?: return -1.0
+
+            val percent = Json.int(resume, "percentDurationWatched")
+
+            if (percent <= 0) {
+                return -1.0
+            }
+
+            return minOf(1.0, percent / 100.0)
+        }
+
+        /**
+         * С какой секунды продолжать — по слову сервера.
+         *
+         * `watchEndpoint.startTimeSeconds` лежит у той же плитки, где доля
+         * просмотра. Своего хранилища для этого не нужно: сервер знает
+         * и о просмотрах с других устройств, и о том, что ролик досмотрен.
+         */
+        private fun resumeAtIn(renderer: JSONObject?): Double {
+            val watch = Json.findFirst("watchEndpoint", renderer, 600)
+
+            return Json.int(watch, "startTimeSeconds").toDouble()
         }
 
         /** Разбор одного рендерера в карточку; null, если это не ролик. */
@@ -613,6 +672,9 @@ class VideoItem {
             if (item.published == null && last >= 0) {
                 item.published = lockupMetadataPart(renderer, last, 1)
             }
+
+            item.watchedShare = watchedShareIn(renderer)
+            item.resumeAt = resumeAtIn(renderer)
 
             return item
         }

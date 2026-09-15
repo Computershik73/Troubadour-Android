@@ -171,7 +171,12 @@ object Nav {
     // --- Переходы, которые зовут отовсюду ---------------------------------
 
     /** Открыть страницу ролика — зовётся отовсюду, где есть карточка. */
-    fun openVideo(videoId: String?, title: String?, playlistId: String? = null) {
+    fun openVideo(
+        videoId: String?,
+        title: String?,
+        playlistId: String? = null,
+        startAt: Double = 0.0
+    ) {
         val id = videoId ?: return
         val parent = host ?: return
 
@@ -186,7 +191,7 @@ object Nav {
          */
         closeMiniPlayer()
 
-        push(PlayerScreen(parent.context, id, title ?: "", playlistId))
+        push(PlayerScreen(parent.context, id, title ?: "", playlistId, startAt))
     }
 
     /** Убирает окошко мини-плеера, если оно открыто. */
