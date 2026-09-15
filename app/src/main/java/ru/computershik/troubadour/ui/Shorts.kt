@@ -191,9 +191,26 @@ class ShortsView(context: Context) : FrameLayout(context) {
          * чуть раньше, чем плеер признаётся, что играет, и картинка
          * появлялась позже звука.
          */
-        Notify.on(PlayerEngine.FIRST_FRAME, this) { revealFrame() }
+        Notify.on(PlayerEngine.FIRST_FRAME, this) {
+            if (running) {
+                revealFrame()
+            }
+        }
 
+        /**
+         * Слушаем, только пока листалка на виду.
+         *
+         * Вид остаётся в окне и тогда, когда поверх него открыт другой
+         * экран: стопка лежит **над** оболочкой, а не вместо неё, и
+         * вкладка под ней никуда не девается. Без этой оговорки листалка
+         * ловила конец чужого ролика — того, что играл на странице
+         * сверху, — и заводила свой следующий Shorts в чужую поверхность.
+         */
         Notify.on(PlayerEngine.STATE, this) {
+            if (!running) {
+                return@on
+            }
+
             if (it as? Int == com.google.android.exoplayer2.Player.STATE_ENDED) {
                 playbackFinished()
             }
@@ -460,6 +477,8 @@ class ShortsView(context: Context) : FrameLayout(context) {
         running = true
 
         if (items.isNotEmpty()) {
+            resume()
+
             return
         }
 
@@ -470,6 +489,28 @@ class ShortsView(context: Context) : FrameLayout(context) {
         }
 
         loadMore(true)
+    }
+
+    /**
+     * Вернулись к листалке — забираем плеер обратно.
+     *
+     * Прежде возвращение не делало ничего: лента уже набрана, и `start`
+     * выходил сразу. Поверхность при этом оставалась у того, кто забрал
+     * её последним, — у страницы ролика или у окошка, — и наш ролик
+     * рисовался туда.
+     */
+    private fun resume() {
+        val id = items.getOrNull(at)?.videoId ?: return
+
+        if (PlayerEngine.videoId == id) {
+            PlayerEngine.attach(surface)
+            PlayerEngine.play()
+
+            return
+        }
+
+        // В плеере чужой ролик — поднимаем свой заново.
+        show(at)
     }
 
     private fun loadMore(first: Boolean) {
@@ -996,11 +1037,24 @@ class ShortsView(context: Context) : FrameLayout(context) {
         private const val SLIDE_MS = 220L
     }
 
+    /**
+     * Уходим с листалки — замолкаем.
+     *
+     * Плеер глушим **только свой**. Он один на всё приложение, и когда
+     * листалка уступает место, на нём уже может идти чужой ролик:
+     * оповещение о смене стопки приходит и тогда, когда страницу ролика
+     * открыли с другой вкладки. Глуши мы его наотмашь — открытый ролик
+     * замолкал бы в тот же миг.
+     */
     fun stop() {
         running = false
 
-        PlayerEngine.pause()
-        PlayerEngine.attach(null)
+        val mine = items.getOrNull(at)?.videoId
+
+        if (mine != null && PlayerEngine.videoId == mine) {
+            PlayerEngine.pause()
+            PlayerEngine.attach(null)
+        }
     }
 }
 
@@ -1009,8 +1063,10 @@ class ShortsSection(context: Context) : Shell.Section(context) {
 
     private lateinit var shorts: ShortsView
 
+    private lateinit var root: FrameLayout
+
     override fun build(): ViewGroup {
-        val root = FrameLayout(context)
+        root = FrameLayout(context)
 
         shorts = ShortsView(context)
 
@@ -1022,11 +1078,39 @@ class ShortsSection(context: Context) : Shell.Section(context) {
             )
         )
 
+        // Над вкладкой открыли экран или закрыли — наша очередь сменилась.
+        Notify.on(Nav.NAV, this) { syncWithStack() }
+
         return root
     }
 
+    /**
+     * Листалка своя, только когда над ней ничего не открыто.
+     *
+     * Стопка экранов лежит **над** оболочкой, и вкладка под ней остаётся
+     * в окне: ни `disappear`, ни `appear` ей при этом не приходит.
+     * Поэтому смотрим на саму стопку — и по её пустоте решаем, наша
+     * сейчас очередь или нет.
+     */
+    private fun syncWithStack() {
+        val mine = root.visibility == View.VISIBLE && Nav.top() == null
+
+        if (mine) {
+            /**
+             * Окошко мини-плеера на Shorts не место: плеер один на всё
+             * приложение, и листалка сейчас же заберёт его себе.
+             * Окошко осталось бы застывшим кадром с чужим названием.
+             */
+            Nav.closeMiniPlayer()
+
+            shorts.start()
+        } else {
+            shorts.stop()
+        }
+    }
+
     override fun appear() {
-        shorts.start()
+        syncWithStack()
     }
 
     /**
@@ -1063,6 +1147,22 @@ class ShortsScreen(context: Context, private val item: VideoItem) : Screen(conte
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
         )
+
+        shorts.start()
+    }
+
+    /**
+     * Поверх листалки открыли экран — она замолкает и отдаёт плеер.
+     *
+     * Без этого она продолжала слушать плеер из-под чужой страницы
+     * и заводила следующий Shorts, когда там кончался свой ролик.
+     */
+    override fun disappear() {
+        shorts.stop()
+    }
+
+    override fun appear() {
+        Nav.closeMiniPlayer()
 
         shorts.start()
     }
