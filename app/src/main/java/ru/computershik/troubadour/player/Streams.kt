@@ -66,14 +66,18 @@ class Format {
     /** Родная, но с поджатой громкостью: `drc=1`. */
     var audioIsCompressed: Boolean = false
 
+    /** Как ступень зовёт сам сервер: «1080p50», «720p». */
+    var qualityLabel: String? = null
+
     /**
      * Ступень качества — «1080p».
      *
-     * Порт `QualityTierOf`: у вертикального ролика (1080×1920) это
-     * **меньшая** сторона, а не высота, иначе подпись читалась бы
-     * как «1920p».
+     * Спрашивается у сервера, а не считается по кадру. Подробности —
+     * над [Streams.tierFromLabel].
      */
     fun qualityTier(): Int {
+        Streams.tierFromLabel(qualityLabel)?.let { return it }
+
         if (width > 0 && height > 0) {
             return Streams.canonicalTier(minOf(width, height))
         }
@@ -110,6 +114,39 @@ object Streams {
      * ступени.
      */
     private val STEPS = intArrayOf(144, 240, 360, 480, 720, 1080, 1440, 2160, 4320)
+
+    /**
+     * Ступень по метке сервера — «1080p50» это 1080.
+     *
+     * Считать её по кадру нельзя, и вот почему. У ролика 21:9 дорожка,
+     * которую YouTube зовёт `1080p50`, имеет размер 1920×800, а та, что
+     * зовётся `720p50`, — 1280×534. Считая по меньшей стороне, мы
+     * называли первую 720p, вторую 480p, а `426×178` не укладывалось
+     * ни в одну знакомую ступень и оставалось «178p».
+     *
+     * Беда не в подписи. Ступень уходит подаче полем 21, и сервер
+     * понимает её **по-своему**: просьба «720» приносила ту дорожку,
+     * которую он сам зовёт 720p, то есть нашу «480p». Человек просил
+     * 720p50, получал ровно её — но в списке она подписана 480p50,
+     * и «сейчас» стояло у неё. Спор был не о дорожке, а о её имени.
+     *
+     * Поэтому имя спрашиваем у того, кто им распоряжается.
+     */
+    fun tierFromLabel(label: String?): Int? {
+        if (label.isNullOrEmpty()) {
+            return null
+        }
+
+        val digits = label.takeWhile { it.isDigit() }
+
+        if (digits.isEmpty()) {
+            return null
+        }
+
+        val tier = digits.toIntOrNull() ?: return null
+
+        return if (tier in 100..4320) tier else null
+    }
 
     fun canonicalTier(raw: Int): Int {
         if (raw <= 0) {
@@ -309,6 +346,8 @@ object Streams {
     }
 
     private fun tierIn(format: JSONObject): Int {
+        tierFromLabel(Json.text(format, "qualityLabel"))?.let { return it }
+
         val width = Json.int(format, "width")
         val height = Json.int(format, "height")
 
@@ -903,6 +942,13 @@ object Streams {
 
                     ladder.add(Pair(tier, Json.int(format, "fps")))
 
+                    Log.d {
+                        "[YouTube/Потоки] Видео itag ${Json.int(format, "itag")}: " +
+                            "${Json.int(format, "width")}×${Json.int(format, "height")}, " +
+                            "${Json.int(format, "fps")} кадр/с, метка " +
+                            "${Json.text(format, "qualityLabel") ?: "—"}, ступень ${tier}p"
+                    }
+
                     val sixty = Json.int(format, "fps") > 31
 
                     // Тумблер выключен — шестидесятикадровых нет вовсе.
@@ -1412,6 +1458,7 @@ object Streams {
                 entry.mimeType = mime
                 entry.itag = Json.int(format, "itag")
                 entry.fps = Json.int(format, "fps")
+                entry.qualityLabel = Json.text(format, "qualityLabel")
                 entry.bitrate = Json.int(format, "bitrate")
                 entry.averageBitrate = Json.int(format, "averageBitrate")
 
