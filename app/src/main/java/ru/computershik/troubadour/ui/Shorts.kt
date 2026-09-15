@@ -69,6 +69,25 @@ class ShortsView(context: Context) : FrameLayout(context) {
     private var busy = false
 
     /**
+     * Показывается ли листалка прямо сейчас.
+     *
+     * Поток за роликом едет своим ходом, и ответ приходит когда придёт —
+     * в том числе когда человек уже ушёл на другую вкладку. Прежде такой
+     * ответ всё равно запускал воспроизведение, и ролик начинал играть
+     * из-под чужого экрана.
+     */
+    private var running = false
+
+    /**
+     * Ролик, о конце которого уже отчитались.
+     *
+     * `STATE_ENDED` приходит не один раз — плеер рассылает его и сам,
+     * и вслед за закрытием записи просмотра. Без отметки второй приход
+     * перелистывал бы ещё на один ролик вперёд.
+     */
+    private var finishedId: String? = null
+
+    /**
      * Ставит поверхность по соотношению сторон ролика, посередине.
      *
      * Зовётся после обычной раскладки: `TextureView` тянет содержимое
@@ -80,10 +99,12 @@ class ShortsView(context: Context) : FrameLayout(context) {
             return
         }
 
-        val format = PlayerEngine.player?.videoFormat
-
-        if (format != null && format.width > 0 && format.height > 0) {
-            frameAspect = format.width.toFloat() / format.height.toFloat()
+        /**
+         * Пропорцию спрашиваем у плеера, а он берёт её у самого потока
+         * и с поправкой на неквадратный пиксель.
+         */
+        if (PlayerEngine.videoRatio > 0) {
+            frameAspect = PlayerEngine.videoRatio
         }
 
         var frameWidth = width
@@ -105,6 +126,37 @@ class ShortsView(context: Context) : FrameLayout(context) {
         super.onLayout(changed, left, top, right, bottom)
 
         placeSurface(right - left, bottom - top)
+    }
+
+    /**
+     * Пропорция кадра становится известна не сразу — переспрашиваем
+     * раскладку, когда её назовут.
+     *
+     * Прежде [placeSurface] звалась только из раскладки, а новую после
+     * смены ролика никто не просил: поверхность держала пропорцию
+     * прошлого ролика (а у первого — вертикальную по умолчанию),
+     * и кадр, снятый иначе, выходил сплющенным. Помогал разве что
+     * поворот экрана — он раскладку и вызывал.
+     *
+     * Подписка живёт, пока вид в окне: листалка бывает и вкладкой,
+     * и отдельным экраном, и у второй каждый раз своя.
+     */
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+
+        Notify.on(PlayerEngine.VIDEO_SIZE, this) { requestLayout() }
+
+        Notify.on(PlayerEngine.STATE, this) {
+            if (it as? Int == com.google.android.exoplayer2.Player.STATE_ENDED) {
+                playbackFinished()
+            }
+        }
+    }
+
+    override fun onDetachedFromWindow() {
+        super.onDetachedFromWindow()
+
+        Notify.offAll(this)
     }
 
     private var playback: ShortsPlayback? = null
@@ -301,6 +353,8 @@ class ShortsView(context: Context) : FrameLayout(context) {
     // --- Лента ------------------------------------------------------------
 
     fun start() {
+        running = true
+
         if (items.isNotEmpty()) {
             return
         }
@@ -384,7 +438,14 @@ class ShortsView(context: Context) : FrameLayout(context) {
             val ready = Api.shortsPlayback(videoId)
 
             main {
-                if (at != index) {
+                /**
+                 * Ушли с листалки, пока поток ехал, — не начинаем.
+                 *
+                 * Ответ мог опоздать и на смену ролика, и на уход
+                 * со вкладки; первое ловит сверка с [at], второе —
+                 * [running].
+                 */
+                if (at != index || !running) {
                     return@main
                 }
 
@@ -518,16 +579,49 @@ class ShortsView(context: Context) : FrameLayout(context) {
         )
     }
 
-    /** Ролик доиграл: повторяем либо идём дальше — по настройке. */
+    /**
+     * Ролик доиграл: повторяем либо идём дальше — по настройке.
+     *
+     * Прежде это никто не звал вовсе: доигравший Shorts просто
+     * останавливался на последнем кадре, и тумблер «Следующий Shorts»
+     * в настройках не значил ничего.
+     */
     fun playbackFinished() {
-        if (Settings.autoplayNextShort) {
-            show(at + 1)
-        } else {
-            PlayerEngine.seekTo(0.0)
+        if (!running) {
+            return
         }
+
+        val playing = items.getOrNull(at)?.videoId
+
+        if (playing != null && playing == finishedId) {
+            return
+        }
+
+        finishedId = playing
+
+        /**
+         * Дошли до хвоста — просим продолжение.
+         *
+         * Без этого повтор становится единственным ходом: лента не
+         * растёт, листать некуда, и ролик идёт по кругу.
+         */
+        if (at + 1 >= items.size) {
+            loadMore(false)
+        }
+
+        if (Settings.autoplayNextShort && at + 1 < items.size) {
+            show(at + 1)
+
+            return
+        }
+
+        PlayerEngine.seekTo(0.0)
+        PlayerEngine.play()
     }
 
     fun stop() {
+        running = false
+
         PlayerEngine.pause()
         PlayerEngine.attach(null)
     }
