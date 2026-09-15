@@ -767,7 +767,7 @@ class QualityMenu(context: Context) : Sheet(context, loc("В каком каче
 
         // Сверху вниз, от крупного к мелкому — привычный порядок.
         for (height in heights.sortedDescending()) {
-            var title = "${height}p"
+            var title = "${height}p" + framesSuffix(height)
 
             if (Streams.isBeyondDevice(height)) {
                 title += loc(" — может не пойти")
@@ -783,6 +783,46 @@ class QualityMenu(context: Context) : Sheet(context, loc("В каком каче
                 }
             )
         }
+
+        /**
+         * Куда делось 1080p — объясняем прямо в списке.
+         *
+         * Ступени, которых у ролика нет ниже шестидесяти кадров, тумблер
+         * «60 кадров» убирает целиком, и со стороны это выглядит как
+         * пропажа. Строка внизу называет пропавшее и говорит, чем его
+         * вернуть.
+         */
+        val missing = Streams.sixtyOnlyHeights().filter { !heights.contains(it) }
+
+        if (missing.isNotEmpty()) {
+            val named = missing.sortedDescending().joinToString(", ") { "${it}p" }
+
+            add(
+                row(
+                    ru.computershik.troubadour.locF(
+                        "Нет %@? У этого ролика такое качество есть только " +
+                            "в 60 кадрах. Включите «60 кадров» в настройках, " +
+                            "если устройство его потянет.",
+                        named
+                    ),
+                    null, false
+                ) {}
+            )
+        }
+    }
+
+    /**
+     * Суффикс частоты — только выше тридцати, как у самого YouTube.
+     *
+     * «1080p60» он пишет, а «720p30» — нет: тридцать кадров это
+     * обыкновение, и называть его значило бы засорять список тем, что
+     * и так подразумевается. У ролика, снятого на 24 кадра, суффикса
+     * тоже нет: он ниже обыкновения, а не выше.
+     */
+    private fun framesSuffix(height: Int): String {
+        val rate = Streams.framesForHeight(height)
+
+        return if (rate > 30) "$rate" else ""
     }
 }
 

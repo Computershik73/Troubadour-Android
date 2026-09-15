@@ -145,6 +145,89 @@ object Streams {
     private var lastSabrHeights: List<Int> = emptyList()
     private var lastSabrTracks: List<AudioTrack> = emptyList()
 
+    /**
+     * Частота каждой доступной ступени и ступени, скрытые тумблером.
+     *
+     * Нужны меню качества: подпись «1080p60» и ответ на вопрос «а куда
+     * делось 1080p». Считаются вместе, в одном месте, по одним и тем же
+     * дорожкам — иначе подпись и объяснение разошлись бы.
+     */
+    private var tierFrames: Map<Int, Int> = emptyMap()
+    private var sixtyOnlyTiers: List<Int> = emptyList()
+
+    /**
+     * Запоминает лестницу: ступень, её кадры и то, что скрыто тумблером.
+     *
+     * [pairs] — пары «ступень, кадры» по **всем** дорожкам H.264, до
+     * отбора. Отбор делается здесь.
+     *
+     * Частота у ступени — не наша выдумка и не округление: её называет
+     * сам YouTube для каждой дорожки. У ролика, снятого на 24 кадра, так
+     * и стоит 24, а 144p сервер отдаёт половинной частотой.
+     */
+    fun rememberLadder(pairs: List<Pair<Int, Int>>) {
+        val frames = HashMap<Int, Int>()
+        val all = HashSet<Int>()
+
+        val thirty = prefersThirtyFrames()
+
+        for ((tier, rate) in pairs) {
+            if (tier <= 0) {
+                continue
+            }
+
+            all.add(tier)
+
+            if (thirty && rate > 31) {
+                continue
+            }
+
+            val have = frames[tier]
+
+            if (have == null || rate > have) {
+                frames[tier] = rate
+            }
+        }
+
+        val only = all.filter { !frames.containsKey(it) }.sorted()
+
+        synchronized(this) {
+            tierFrames = frames
+            sixtyOnlyTiers = only
+        }
+
+        Log.d {
+            val listed = StringBuilder()
+
+            for (tier in frames.keys.sorted()) {
+                if (listed.isNotEmpty()) {
+                    listed.append(", ")
+                }
+
+                listed.append("${tier}p${frames[tier]}")
+            }
+
+            for (tier in only) {
+                if (listed.isNotEmpty()) {
+                    listed.append(", ")
+                }
+
+                listed.append("${tier}p — только 60")
+            }
+
+            "[YouTube/Потоки] Лестница качеств: " +
+                (if (listed.isEmpty()) "пусто" else listed.toString())
+        }
+    }
+
+    /** Частота ступени; 0 — не знаем. */
+    fun framesForHeight(height: Int): Int = synchronized(this) {
+        tierFrames[height] ?: 0
+    }
+
+    /** Ступени, которых у ролика нет ниже шестидесяти кадров. */
+    fun sixtyOnlyHeights(): List<Int> = synchronized(this) { sixtyOnlyTiers }
+
     /** Ступень каждой видеодорожки по её номеру — чтобы узнать сыгранную. */
     private var sabrTiers = HashMap<Int, Int>()
 
@@ -782,6 +865,9 @@ object Streams {
 
         sabrTiers = HashMap()
 
+        // Лестница считается по всем дорожкам, до отбора.
+        val ladder = ArrayList<Pair<Int, Int>>()
+
         if (adaptive != null) {
             for (index in 0 until adaptive.length()) {
                 val format = adaptive.opt(index) as? JSONObject ?: continue
@@ -789,6 +875,8 @@ object Streams {
 
                 if (mime.contains("avc1")) {
                     val tier = tierIn(format)
+
+                    ladder.add(Pair(tier, Json.int(format, "fps")))
 
                     // То же правило, что и при выборе: шестидесятикадровых
                     // на слабом железе не предлагаем и серверу.
@@ -866,6 +954,8 @@ object Streams {
                 }
             }
         }
+
+        rememberLadder(ladder)
 
         lastSabrHeights = tiers.sorted()
         lastSabrTracks = if (tracks.size > 1) tracks else emptyList()
@@ -1306,6 +1396,14 @@ object Streams {
                 result.add(entry)
             }
         }
+
+        /**
+         * Лестницу помним и здесь: у готовых адресов список качеств
+         * строится этими же дорожками, и меню спрашивает частоту у неё.
+         */
+        rememberLadder(
+            result.filter { it.isH264() }.map { Pair(it.qualityTier(), it.fps) }
+        )
 
         Log.d {
             val summary = result.joinToString(" ") {
