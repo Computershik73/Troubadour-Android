@@ -214,11 +214,43 @@ class VideoItem {
             return Json.thumbnail(Json.obj(view, "image"), "sources", minWidth)
         }
 
-        /** Сколько строк метаданных у карточки: по ним видно, что в них лежит. */
-        private fun lockupMetadataRows(renderer: JSONObject): Int {
+        /**
+         * Строки метаданных, в которых **есть текст**.
+         *
+         * Не всякая строка текстовая: рядом с ними сервер кладёт строку
+         * со значками («Новинка», «4K») — у неё вместо `metadataParts`
+         * лежит `badges`. Прежний разбор считал строки подряд и брал
+         * последнюю; на карточке со значком последней оказывалась
+         * именно она, и от карточки оставался один заголовок — ни
+         * просмотров, ни давности.
+         */
+        private fun lockupTextRows(renderer: JSONObject): List<Int> {
             val holder = Json.findFirst("contentMetadataViewModel", renderer, 600)
+            val rows = Json.array(holder, "metadataRows") ?: return emptyList()
 
-            return Json.array(holder, "metadataRows")?.length() ?: 0
+            val out = ArrayList<Int>()
+
+            for (row in 0 until rows.length()) {
+                val parts = Json.array(Json.objectAt(rows, row), "metadataParts")
+
+                if (parts != null && parts.length() > 0) {
+                    out.add(row)
+                }
+            }
+
+            return out
+        }
+
+        /** Сколько частей в строке метаданных. */
+        private fun lockupPartsIn(renderer: JSONObject, row: Int): Int {
+            val holder = Json.findFirst("contentMetadataViewModel", renderer, 600)
+            val rows = Json.array(holder, "metadataRows") ?: return 0
+
+            if (row < 0 || row >= rows.length()) {
+                return 0
+            }
+
+            return Json.array(Json.objectAt(rows, row), "metadataParts")?.length() ?: 0
         }
 
         /**
@@ -266,7 +298,49 @@ class VideoItem {
                 }
             }
 
-            return -1 to null
+            /**
+             * Ссылки в части нет вовсе — считаем по устройству строк.
+             *
+             * Так отвечают карточки похожих: у них часть с именем канала
+             * это голое `{"text": {"content": "…"}}`, а переход на канал
+             * лежит не в ней, а у кружка автора. Правило по ссылке там
+             * не срабатывает никогда — оттого автора у похожих
+             * и не бывало почти никогда.
+             *
+             * Строки при этом устроены однообразно: сперва автор одной
+             * частью, затем числа — просмотры и давность — двумя.
+             * Значит, строка с числами это последняя текстовая строка,
+             * у которой частей больше одной, а автор — текстовая строка
+             * перед ней. Одна-единственная строка авторской не считается:
+             * на странице канала в ней стоят просмотры, а не имя.
+             */
+            val text = lockupTextRows(renderer)
+
+            if (text.size < 2) {
+                return -1 to null
+            }
+
+            var numbers = -1
+
+            for (row in text) {
+                if (lockupPartsIn(renderer, row) > 1) {
+                    numbers = row
+                }
+            }
+
+            if (numbers < 0) {
+                return -1 to null
+            }
+
+            val before = text.lastOrNull { it < numbers } ?: return -1 to null
+
+            val name = lockupMetadataPart(renderer, before, 0)
+
+            if (name.isNullOrEmpty()) {
+                return -1 to null
+            }
+
+            return before to name
         }
 
         private fun lockupMetadataPart(renderer: JSONObject, row: Int, part: Int): String? {
@@ -563,6 +637,36 @@ class VideoItem {
                 item.channelId = browseId
             }
 
+            /**
+             * Кружок автора у новой разметки — у самой карточки, а не
+             * у имени.
+             *
+             * `decoratedAvatarViewModel` несёт и картинку, и переход
+             * на канал. Прежде у карточек похожих не было ни того,
+             * ни другого: кружок искали под ключом `channelThumbnail`,
+             * которого в этой разметке нет вовсе.
+             */
+            val decorated = Json.findFirst("decoratedAvatarViewModel", renderer, 600)
+
+            if (decorated != null) {
+                if (item.channelThumbnail.isNullOrEmpty()) {
+                    val avatar = Json.findFirst("avatarViewModel", decorated, 200)
+
+                    item.channelThumbnail = Json.thumbnail(
+                        Json.obj(avatar, "image"), "sources", 88
+                    )
+                }
+
+                if (item.channelId.isNullOrEmpty()) {
+                    val toChannel = Json.findFirst("browseEndpoint", decorated, 200)
+                    val identifier = Json.text(toChannel, "browseId")
+
+                    if (identifier != null && identifier.startsWith("UC")) {
+                        item.channelId = identifier
+                    }
+                }
+            }
+
             item.thumbnail = Json.thumbnail(renderer, "thumbnail", 480)
 
             if (item.thumbnail == null) {
@@ -657,10 +761,12 @@ class VideoItem {
              * и в просмотры попадало имя канала — то же самое, что уже стоит
              * автором.
              */
-            var last = lockupMetadataRows(renderer) - 1
+            val textRows = lockupTextRows(renderer)
+
+            var last = textRows.lastOrNull() ?: -1
 
             if (last == authorRow) {
-                last -= 1
+                last = textRows.lastOrNull { it < authorRow } ?: -1
             }
 
             if (last >= 0 && item.viewCount == null) {
