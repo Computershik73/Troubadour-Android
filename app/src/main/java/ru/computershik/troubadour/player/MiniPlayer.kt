@@ -237,7 +237,16 @@ object MiniPlayer {
     /**
      * Сворачивает: забирает поверхность себе и показывает окно.
      */
-    fun show(screen: Screen, videoId: String, title: String, author: String) {
+    /** Заслонка с последним кадром, пока новая поверхность не ожила. */
+    private var still: ImageView? = null
+
+    fun show(
+        screen: Screen,
+        videoId: String,
+        title: String,
+        author: String,
+        shot: android.graphics.Bitmap? = null
+    ) {
         val parent = host ?: return
 
         if (window != null) {
@@ -264,6 +273,36 @@ object MiniPlayer {
         )
 
         surface = view
+
+        /**
+         * Снимок кадра поверх поверхности — до первого своего кадра.
+         *
+         * Новый `TextureView` заводит поверхность не раньше следующей
+         * раскладки, и до первого кадра на её месте чернота. Снимок,
+         * принесённый со страницы, её закрывает, и сворачивание
+         * выглядит переносом картинки, а не её пропажей.
+         */
+        val cover = ImageView(context)
+
+        cover.scaleType = ImageView.ScaleType.FIT_CENTER
+        cover.setImageBitmap(shot)
+
+        cover.visibility = if (shot != null) View.VISIBLE else View.GONE
+
+        box.addView(
+            cover,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+
+        still = cover
+
+        Notify.on(PlayerEngine.FIRST_FRAME, this) {
+            still?.visibility = View.GONE
+            still?.setImageBitmap(null)
+        }
 
         /**
          * Кнопки стоят по верхним углам, а не посреди картинки.
@@ -530,7 +569,20 @@ object MiniPlayer {
     fun restore() {
         val screen = owner ?: return
 
+        /**
+         * Снимок отдаём странице до того, как окошко разберут: у неё
+         * поверхность тоже заводится заново, и без снимка там та же
+         * чернота, только на весь кадр.
+         */
+        val shot = try {
+            surface?.takeIf { it.isAvailable }?.bitmap
+        } catch (error: Throwable) {
+            null
+        }
+
         hideWindow()
+
+        (screen as? ru.computershik.troubadour.ui.PlayerScreen)?.holdFrame(shot)
 
         if (Nav.contains(screen)) {
             Nav.popTo(screen)
@@ -558,8 +610,12 @@ object MiniPlayer {
 
         PlayerEngine.attach(null)
 
+        // Подписка на первый кадр живёт вместе с окном.
+        Notify.offAll(this)
+
         parent?.removeView(box)
 
+        still = null
         window = null
         surface = null
     }

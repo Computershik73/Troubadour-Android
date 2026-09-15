@@ -89,7 +89,7 @@ class PlayerStage(context: Context) : ViewGroup(context) {
      * Заслонка поверх картинки, пока не пришёл первый кадр нового ролика.
      * Того же цвета, что и подложка кадра, — на глаз её не видно.
      */
-    private val blind = View(context)
+    private val blind = ImageView(context)
 
     /** Затемнение под нижней полосой — `player/bg.png` из оригинала. */
     private val scrim = ImageView(context)
@@ -307,6 +307,7 @@ class PlayerStage(context: Context) : ViewGroup(context) {
         addView(surface)
 
         blind.setBackgroundColor(stageBackground)
+        blind.scaleType = ImageView.ScaleType.FIT_CENTER
         blind.visibility = GONE
 
         addView(blind)
@@ -498,12 +499,65 @@ class PlayerStage(context: Context) : ViewGroup(context) {
      * хотя в мини-плеере, у которого своя поверхность, всё шло.
      */
     fun clearFrame() {
+        blind.setImageBitmap(null)
+
         blind.visibility = VISIBLE
+    }
+
+    /**
+     * Заслонка с последним кадром — на время пересадки поверхности.
+     *
+     * Уходя в окошко и возвращаясь, вид снимают с окна, а `TextureView`
+     * при этом теряет свою поверхность: новая заводится не раньше
+     * следующей раскладки, и до первого кадра на её месте чернота.
+     * Снимок последнего кадра эту черноту закрывает, и переход выглядит
+     * так, будто картинка никуда не девалась.
+     *
+     * Снимок берётся у самого вида и стоит недорого: кадр уже лежит
+     * в его текстуре, читать его заново неоткуда.
+     */
+    fun holdFrame(shot: android.graphics.Bitmap?) {
+        blind.setImageBitmap(shot)
+
+        blind.visibility = VISIBLE
+
+        /**
+         * Снимок держим не дольше двух с половиной секунд.
+         *
+         * Снимается он по первому кадру, и тот приходит: смена
+         * поверхности у ExoPlayer первый кадр объявляет заново.
+         * Но застывшая картинка поверх идущего ролика — худшее,
+         * чем можно кончить, и подстраховка тут дешевле уверенности.
+         */
+        blind.removeCallbacks(dropHold)
+        blind.postDelayed(dropHold, 2500)
+    }
+
+    private val dropHold = Runnable {
+        if (blind.drawable != null) {
+            showFrame()
+        }
+    }
+
+    /**
+     * Снимок того, что сейчас на кадре.
+     *
+     * Берётся у самого вида и стоит недорого: кадр уже лежит в его
+     * текстуре. Пусто, если поверхность ещё не заведена.
+     */
+    fun lastFrame(): android.graphics.Bitmap? = try {
+        if (surface.isAvailable) surface.bitmap else null
+    } catch (error: Throwable) {
+        null
     }
 
     /** Кадр пришёл — убираем заслонку. */
     fun showFrame() {
+        blind.removeCallbacks(dropHold)
+
         blind.visibility = GONE
+
+        blind.setImageBitmap(null)
     }
 
     fun applyState() {

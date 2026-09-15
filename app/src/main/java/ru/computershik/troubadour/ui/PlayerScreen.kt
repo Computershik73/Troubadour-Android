@@ -712,8 +712,6 @@ class PlayerScreen(
 
         busy = LoadingRing(context)
 
-        subscribeToEvents()
-
         load()
     }
 
@@ -1604,10 +1602,18 @@ class PlayerScreen(
     /** Свернуть в окно, не останавливая воспроизведения. */
     private fun collapse() {
         MiniPlayer.show(
-            this, videoId, titleText, details?.channelTitle ?: ""
+            this, videoId, titleText, details?.channelTitle ?: "",
+            stage.lastFrame()
         )
 
         Nav.pop()
+    }
+
+    /** Снимок кадра, чтобы окошко и страница менялись без черноты. */
+    fun lastFrame(): android.graphics.Bitmap? = stage.lastFrame()
+
+    fun holdFrame(shot: android.graphics.Bitmap?) {
+        stage.holdFrame(shot)
     }
 
     private fun openDescription() {
@@ -1854,6 +1860,9 @@ class PlayerScreen(
     // --- Ход воспроизведения ----------------------------------------------
 
     private fun subscribeToEvents() {
+        // Заводится при каждом показе — прежние снимаем, чтобы не двоить.
+        Notify.offAll(this)
+
         Notify.on(PlayerEngine.PROGRESS, this) { tick() }
 
         Notify.on(PlayerEngine.STATE, this) {
@@ -2100,6 +2109,19 @@ class PlayerScreen(
     // --- Жизнь ------------------------------------------------------------
 
     override fun appear() {
+        /**
+         * Подписки заводятся здесь, а не при сборке, и заводятся заново
+         * при каждом показе.
+         *
+         * Сворачивание в окошко уводит страницу из стопки через
+         * `Nav.pop()`, а тот зовёт `destroy()` — и `Notify.offAll`
+         * снимает с неё все подписки разом. Возвращается та же страница
+         * (окошко держит её у себя), собирается она один раз, и подписки
+         * прежде не восстанавливались никогда: часы стояли, а значок
+         * «играет/пауза» не менялся, хотя ролик шёл.
+         */
+        subscribeToEvents()
+
         PlayerEngine.attach(stage.surface)
 
         stage.applyState()
