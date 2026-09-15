@@ -575,6 +575,19 @@ class PlayerScreen(
 
         holder.orientation = LinearLayout.VERTICAL
 
+        /**
+         * Отступ под строку состояния.
+         *
+         * С Android 5 окно рисуется под ней — она прозрачная, и высоту
+         * её панели отмеряют сами. Всем прочим экранам этот отступ даёт
+         * их шапка (`ScreenHeader`), а у страницы ролика шапки нет:
+         * сверху сразу кадр, и он уезжал под часы и значки.
+         *
+         * В развёрнутом виде отступ снимается: там кадру отдан весь
+         * экран, а строки состояния нет вовсе.
+         */
+        holder.setPadding(0, statusBarHeight(), 0, 0)
+
         stage = PlayerStage(context)
 
         stage.onPlayPause = { togglePlay() }
@@ -1581,6 +1594,9 @@ class PlayerScreen(
 
             stage.layoutParams = params
         }
+
+        // Развёрнутому кадру строка состояния места не оставляет.
+        holder.setPadding(0, if (fullscreen) 0 else statusBarHeight(), 0, 0)
 
         view.requestLayout()
     }
