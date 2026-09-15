@@ -181,6 +181,13 @@ class ShortsView(context: Context) : FrameLayout(context) {
 
         Notify.on(PlayerEngine.VIDEO_SIZE, this) { requestLayout() }
 
+        /** Пошёл новый ролик — показываем кадр и убираем превью. */
+        Notify.on(PlayerEngine.FIRST_FRAME, this) {
+            surface.visibility = VISIBLE
+
+            cover.visibility = GONE
+        }
+
         Notify.on(PlayerEngine.STATE, this) {
             if (it as? Int == com.google.android.exoplayer2.Player.STATE_ENDED) {
                 playbackFinished()
@@ -500,6 +507,22 @@ class ShortsView(context: Context) : FrameLayout(context) {
 
         val item = items[index]
 
+        /**
+         * Прошлый ролик прерываем сразу, а не когда доедет новый.
+         *
+         * Поток за новым едет секунду-другую, и всё это время
+         * поверхность показывала прошлый — идущий, со звуком, — а поверх
+         * него крутилось кольцо. Со стороны это выглядело так, будто
+         * листание не сработало.
+         *
+         * Кадр прячем заодно: превью лежит **под** поверхностью, и пока
+         * та на виду, его не видно вовсе. Вернём, когда придёт первый
+         * кадр нового ролика.
+         */
+        PlayerEngine.pause()
+
+        surface.visibility = INVISIBLE
+
         titleLabel.text = item.title
         authorLabel.text = item.channelTitle ?: ""
 
@@ -559,8 +582,12 @@ class ShortsView(context: Context) : FrameLayout(context) {
 
                 applyRating()
 
-                cover.visibility = GONE
-
+                /**
+                 * Превью держим до первого кадра.
+                 *
+                 * Прежде его убирали здесь же, до запуска, — и в просвете
+                 * до первого кадра виднелся прошлый ролик.
+                 */
                 PlayerEngine.attach(surface)
                 PlayerEngine.open(videoId, null)
             }
