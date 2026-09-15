@@ -156,6 +156,157 @@ class PlayerScreen(
     /** Спрашивали ли уже про озвучку у этого ролика. */
     private var askedAudioTrack = false
 
+    // --- Ожидание объявленной трансляции ---------------------------------
+
+    /**
+     * Ожидание держится на одном повторяющемся ходе в пять секунд: он
+     * переписывает надпись с оставшимся временем и, когда срок подошёл,
+     * заново просит поток. Ни отдельной нити, ни ожидания в сети здесь
+     * нет — приложение всё это время живёт обычной жизнью, и список,
+     * и описание ролика остаются на месте.
+     */
+    private val clock = android.os.Handler(android.os.Looper.getMainLooper())
+
+    private var broadcastAt = 0.0
+    private var broadcastSaid: String? = null
+    private var broadcastTriedAt = 0.0
+    private var broadcastWaiting = false
+
+    private val broadcastTick = object : Runnable {
+
+        override fun run() {
+            if (!broadcastWaiting) {
+                return
+            }
+
+            showBroadcastWait()
+
+            val now = System.currentTimeMillis() / 1000.0
+
+            /**
+             * Пробовать начинаем не в назначенную секунду, а через
+             * полминуты после неё: у YouTube трансляция поднимается
+             * не мгновенно, и ранние попытки лишь тратят запросы.
+             * Дальше — раз в полминуты, пока не выйдет.
+             */
+            val ready = broadcastAt <= 0 || now >= broadcastAt + 30
+
+            if (ready && now - broadcastTriedAt >= 30) {
+                broadcastTriedAt = now
+
+                Log.d { "[YouTube/Плеер] Пробуем поднять объявленную трансляцию" }
+
+                PlayerEngine.open(videoId, playlistId)
+            }
+
+            clock.postDelayed(this, 5000)
+        }
+    }
+
+    private fun awaitBroadcast(scheduled: Double, said: String?) {
+        broadcastAt = scheduled
+        broadcastSaid = said
+        broadcastTriedAt = System.currentTimeMillis() / 1000.0
+        broadcastWaiting = true
+
+        stage.setBusy(false)
+
+        showBroadcastWait()
+
+        clock.removeCallbacks(broadcastTick)
+        clock.postDelayed(broadcastTick, 5000)
+
+        Log.d {
+            "[YouTube/Плеер] Трансляция " + (
+                if (scheduled > 0) {
+                    "назначена на " + java.util.Date((scheduled * 1000).toLong())
+                } else {
+                    "ещё не началась, час начала в ответе не назван"
+                }
+                ) + " — ждём"
+        }
+    }
+
+    private fun stopBroadcastWait() {
+        broadcastWaiting = false
+
+        clock.removeCallbacks(broadcastTick)
+    }
+
+    /** Надпись об ожидании — тем подробнее, чем ближе срок. */
+    private fun showBroadcastWait() {
+        /** Часа не знаем — говорим словами сервера, а не молчим. */
+        if (broadcastAt <= 0) {
+            status.showMessage(
+                broadcastSaid?.takeIf { it.isNotEmpty() }
+                    ?: loc("Трансляция ещё не началась — ждём…")
+            )
+
+            return
+        }
+
+        val left = broadcastAt - System.currentTimeMillis() / 1000.0
+
+        if (left <= 0) {
+            status.showMessage(loc("Ждём начала трансляции…"))
+
+            return
+        }
+
+        if (left < 60) {
+            status.showMessage(loc("Трансляция вот-вот начнётся"))
+
+            return
+        }
+
+        if (left < 3600) {
+            status.showMessage(
+                ru.computershik.troubadour.locF(
+                    "Трансляция начнётся через %ld мин", (left / 60).toLong()
+                )
+            )
+
+            return
+        }
+
+        /**
+         * Дальше часа — со днём, иначе одно время вводит в заблуждение.
+         *
+         * «Начнётся в 17:30» у трансляции, до которой двенадцать часов,
+         * читается как «сегодня вечером», а она может быть и завтра.
+         */
+        val when0 = java.util.Date((broadcastAt * 1000).toLong())
+
+        val today = java.util.Calendar.getInstance()
+        val day = java.util.Calendar.getInstance()
+
+        day.time = when0
+
+        val sameDay =
+            today.get(java.util.Calendar.YEAR) == day.get(java.util.Calendar.YEAR) &&
+                today.get(java.util.Calendar.DAY_OF_YEAR) ==
+                day.get(java.util.Calendar.DAY_OF_YEAR)
+
+        val shape = if (sameDay) {
+            android.text.format.DateFormat.getTimeFormat(context)
+        } else {
+            android.text.format.DateFormat.getDateFormat(context)
+        }
+
+        status.showMessage(
+            ru.computershik.troubadour.locF(
+                "Трансляция начнётся %@",
+                if (sameDay) {
+                    shape.format(when0)
+                } else {
+                    shape.format(when0) + " " +
+                        android.text.format.DateFormat.getTimeFormat(context)
+                            .format(when0)
+                }
+            )
+        )
+    }
+
     companion object {
         /**
          * Доля левой колонки — то же число, что в оригинале и в Трубаче.
@@ -1071,6 +1222,8 @@ class PlayerScreen(
     private fun load() {
         askedAudioTrack = false
 
+        stopBroadcastWait()
+
         // Новый ролик — своя пропорция; подгон прежнего к нему не относится.
         stage.resetZoom()
 
@@ -1680,7 +1833,19 @@ class PlayerScreen(
         /** Стала известна пропорция кадра — переложить его по ней. */
         Notify.on(PlayerEngine.VIDEO_SIZE, this) { stage.requestLayout() }
 
+        Notify.on(PlayerEngine.UPCOMING, this) { about ->
+            @Suppress("UNCHECKED_CAST")
+            val pair = about as? Pair<Double, String?>
+
+            awaitBroadcast(pair?.first ?: 0.0, pair?.second)
+        }
+
         Notify.on(PlayerEngine.FIRST_FRAME, this) {
+            /** Трансляция поднялась — ожидание кончилось. */
+            stopBroadcastWait()
+
+            status.hide()
+
             stage.showFrame()
 
             askAudioTrackIfAsked()
@@ -1880,6 +2045,9 @@ class PlayerScreen(
 
     override fun destroy() {
         super.destroy()
+
+        // Ожидание трансляции экран не переживает: ждать больше некому.
+        stopBroadcastWait()
 
         (context as? MainActivity)?.keepAwake(false)
 

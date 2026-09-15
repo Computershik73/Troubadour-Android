@@ -1035,3 +1035,92 @@ fun Api.probeSeenIp(): String? {
     return Json.findString("clientIpAddress", json, 20000)
         ?: Json.findString("visitorIp", json, 20000)
 }
+
+/**
+ * Заставка объявленной трансляции — в ней час начала и слова сервера.
+ */
+private fun Api.offlineSlateIn(json: JSONObject?): JSONObject? =
+    Json.findFirst("liveStreamOfflineSlateRenderer", json, 200000)
+
+/**
+ * Эфир объявлен, но ещё не начался.
+ *
+ * Сервер отвечает `LIVE_STREAM_OFFLINE` и кладёт рядом час начала.
+ * Потоков при этом нет ни у одного клиента, и перебирать их бессмысленно:
+ * десяток запросов и четыре секунды, после чего плеер всё равно покажет
+ * пустоту.
+ */
+fun Api.isUpcomingBroadcast(json: JSONObject?): Boolean {
+    if (json == null) {
+        return false
+    }
+
+    return Json.string(Json.obj(json, "playabilityStatus"), "status", "") ==
+        "LIVE_STREAM_OFFLINE"
+}
+
+/**
+ * Что об ожидании говорит сам сервер.
+ *
+ * В заставке лежит готовая строка вроде «Трансляция начнётся 14 сентября
+ * в 11:00» — на языке запроса и с правильным склонением. Когда она есть,
+ * наша собственная надпись не нужна: своя считается из числа, а число
+ * в ответе бывает не всегда.
+ */
+fun Api.offlineSlateTextIn(json: JSONObject?): String? {
+    val slate = offlineSlateIn(json)
+
+    val main = Json.renderedText(slate, "mainText")
+    val under = Json.renderedText(slate, "subtitleText")
+
+    if (!main.isNullOrEmpty() && !under.isNullOrEmpty()) {
+        return "$main\n$under"
+    }
+
+    return if (!main.isNullOrEmpty()) main else under
+}
+
+/**
+ * Час начала объявленной трансляции — в секундах эпохи; 0, если не назван.
+ *
+ * Лежит он у разных клиентов в разных местах: у одних числом в заставке,
+ * у других строкой ISO 8601 в `microformat`. Разбираем оба.
+ */
+fun Api.scheduledStartIn(json: JSONObject?): Double {
+    val slate = offlineSlateIn(json)
+
+    Json.string(slate, "scheduledStartTime")?.toDoubleOrNull()?.let {
+        if (it > 0) {
+            return it
+        }
+    }
+
+    val details = Json.obj(
+        Json.obj(Json.obj(json, "microformat"), "playerMicroformatRenderer"),
+        "liveBroadcastDetails"
+    )
+
+    val stamp = Json.string(details, "startTimestamp")
+
+    if (stamp != null && stamp.length >= 19) {
+        try {
+            val shape = java.text.SimpleDateFormat(
+                "yyyy-MM-dd'T'HH:mm:ss", java.util.Locale.US
+            )
+
+            shape.timeZone = java.util.TimeZone.getTimeZone(
+                "GMT" + stamp.substring(19)
+            )
+
+            val when0 = shape.parse(stamp.substring(0, 19))
+
+            if (when0 != null) {
+                return when0.time / 1000.0
+            }
+        } catch (error: Exception) {
+            // Час не разобрался — обойдёмся словами сервера.
+        }
+    }
+
+    return 0.0
+}

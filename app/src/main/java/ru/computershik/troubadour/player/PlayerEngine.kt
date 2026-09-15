@@ -27,6 +27,9 @@ import ru.computershik.troubadour.net.WebAuth
 import ru.computershik.troubadour.net.androidVrPlayerResponse
 import ru.computershik.troubadour.net.iosPlayerResponse
 import ru.computershik.troubadour.net.isBotGate
+import ru.computershik.troubadour.net.isUpcomingBroadcast
+import ru.computershik.troubadour.net.offlineSlateTextIn
+import ru.computershik.troubadour.net.scheduledStartIn
 import ru.computershik.troubadour.net.mediaUserAgent
 import ru.computershik.troubadour.net.playerResponse
 import ru.computershik.troubadour.net.reportWatched
@@ -62,6 +65,14 @@ object PlayerEngine {
 
     /** Стала известна пропорция кадра — подгонка её перечитывает. */
     const val VIDEO_SIZE = "player-video-size"
+
+    /**
+     * Трансляция объявлена, но ещё не началась.
+     *
+     * Значением идёт пара: час начала в секундах эпохи (ноль — не назван)
+     * и слова сервера из заставки (может не быть).
+     */
+    const val UPCOMING = "player-upcoming"
 
     var player: SimpleExoPlayer? = null
         private set
@@ -615,6 +626,28 @@ object PlayerEngine {
                 heights = emptyList()
 
                 main { startHls(manifest, mark) }
+
+                return
+            }
+
+            /**
+             * Ждём по признаку, а не по найденному часу.
+             *
+             * Час начала лежит у разных клиентов в разных местах, и когда
+             * его не нашлось, человек видел «Не удалось получить поток» —
+             * будто приложение сломалось, хотя трансляция просто ещё
+             * не началась. Признак же однозначен: `LIVE_STREAM_OFFLINE`.
+             * Нет часа — покажем то, что сказал сам сервер, а нет и
+             * этого — хотя бы честное «ещё не началась».
+             */
+            val scheduled = Api.scheduledStartIn(player)
+
+            if (scheduled > 0 || Api.isUpcomingBroadcast(player)) {
+                val said = Api.offlineSlateTextIn(player)
+
+                main {
+                    Notify.post(UPCOMING, Pair(scheduled, said))
+                }
 
                 return
             }
