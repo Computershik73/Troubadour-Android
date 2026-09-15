@@ -181,11 +181,21 @@ class ShortsView(context: Context) : FrameLayout(context) {
 
         Notify.on(PlayerEngine.VIDEO_SIZE, this) { requestLayout() }
 
-        /** Пошёл новый ролик — показываем кадр и убираем превью. */
+        /**
+         * Пошёл новый ролик — показываем кадр и убираем превью.
+         *
+         * Сверяемся с тем, идёт ли воспроизведение. «Первый кадр»
+         * объявляется заново при каждой смене поверхности, в том числе
+         * когда мы отдаём её плееру, где ещё лежит прошлый ролик:
+         * тот на паузе, и по этому признаку его кадр и отличается
+         * от настоящего первого кадра нового.
+         */
         Notify.on(PlayerEngine.FIRST_FRAME, this) {
-            surface.visibility = VISIBLE
+            if (!PlayerEngine.isPlaying) {
+                return@on
+            }
 
-            cover.visibility = GONE
+            revealFrame()
         }
 
         Notify.on(PlayerEngine.STATE, this) {
@@ -521,7 +531,28 @@ class ShortsView(context: Context) : FrameLayout(context) {
          */
         PlayerEngine.pause()
 
+        /**
+         * Поверхность у плеера отбираем, а не просто прячем.
+         *
+         * Пока она при нём, он рисует в неё то, что в нём лежит, —
+         * а лежит ещё прошлый ролик: [PlayerEngine.open] заводит новый
+         * не сразу, поток за ним едет своим ходом. Отобрав поверхность,
+         * мы не оставляем прошлому кадру дороги.
+         */
+        PlayerEngine.attach(null)
+
         surface.visibility = INVISIBLE
+
+        /**
+         * Превью держим до первого кадра, но не дольше нескольких секунд.
+         *
+         * Кадр снимает превью по признаку «идёт воспроизведение», а его
+         * может и не случиться: человек волен нажать паузу, пока поток
+         * едет. Тогда первый кадр придёт при паузе, признак не сойдётся,
+         * и превью осталось бы навсегда. Срок это закрывает.
+         */
+        removeCallbacks(revealLate)
+        postDelayed(revealLate, 4000)
 
         titleLabel.text = item.title
         authorLabel.text = item.channelTitle ?: ""
@@ -704,6 +735,21 @@ class ShortsView(context: Context) : FrameLayout(context) {
     private fun hidePeek() {
         peek.visibility = GONE
         peekFor = -1
+    }
+
+    /** Показывает кадр и убирает превью. */
+    private fun revealFrame() {
+        removeCallbacks(revealLate)
+
+        surface.visibility = VISIBLE
+
+        cover.visibility = GONE
+    }
+
+    private val revealLate = Runnable {
+        if (surface.visibility != VISIBLE) {
+            revealFrame()
+        }
     }
 
     /** Кадр уходящей страницы — у самой поверхности. */
