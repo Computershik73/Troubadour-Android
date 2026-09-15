@@ -134,6 +134,27 @@ class MainActivity : Activity() {
          */
         Notify.on(Notify.LANGUAGE, this) { recreate() }
 
+        /**
+         * Пока что-нибудь играет, экран не гаснет.
+         *
+         * Держим это здесь, а не на странице ролика, и вот почему.
+         * Плеер в приложении один, а показывают его трое: страница
+         * ролика, листалка Shorts и окошко мини-плеера. Флаг же —
+         * свойство окна, и окно тоже одно. Прежде его ставила одна
+         * страница ролика: в Shorts экран гас посреди просмотра,
+         * а свернув ролик в окошко, человек получал то же самое —
+         * уходя, страница флаг снимала.
+         *
+         * `FLAG_KEEP_SCREEN_ON` закрывает и угасание: система приглушает
+         * подсветку перед тем, как погасить экран, и с этим флагом
+         * не делает ни того, ни другого. А вот самочинную подстройку
+         * яркости по датчику освещённости он не отменяет — ею
+         * распоряжается система, и снаружи её не запретить.
+         */
+        Notify.on(PlayerEngine.STATE, this) { applyKeepAwake() }
+
+        Notify.on(PlayerEngine.FIRST_FRAME, this) { applyKeepAwake() }
+
         handleIntent(intent)
 
         /**
@@ -357,6 +378,11 @@ class MainActivity : Activity() {
     }
 
     /** Экран не гаснет, пока идёт видео. */
+    /** Сверяет флаг с тем, идёт ли показ. */
+    fun applyKeepAwake() {
+        keepAwake(PlayerEngine.holdsScreen)
+    }
+
     fun keepAwake(keep: Boolean) {
         if (keep) {
             window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -415,6 +441,11 @@ class MainActivity : Activity() {
         }
 
         Nav.top()?.appear()
+
+        /**
+         * Вернулись из фона — флаг мог не пережить ухода, а показ идёт.
+         */
+        applyKeepAwake()
     }
 
     override fun onPause() {

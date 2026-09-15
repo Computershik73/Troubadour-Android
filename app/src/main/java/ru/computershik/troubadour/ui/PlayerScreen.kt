@@ -1878,7 +1878,7 @@ class PlayerScreen(
 
             stage.setBusy(state == com.google.android.exoplayer2.Player.STATE_BUFFERING)
 
-            (context as? MainActivity)?.keepAwake(PlayerEngine.isPlaying)
+            (context as? MainActivity)?.applyKeepAwake()
         }
 
         Notify.on(PlayerEngine.FAILED, this) { reason ->
@@ -2151,7 +2151,14 @@ class PlayerScreen(
         // Ожидание трансляции экран не переживает: ждать больше некому.
         stopBroadcastWait()
 
-        (context as? MainActivity)?.keepAwake(false)
+        /**
+         * Флаг снимаем не наотмашь, а по делу.
+         *
+         * Уходя в окошко, страница разбирается, а ролик продолжает
+         * играть — и экран после этого гас посреди просмотра. Спрашиваем
+         * у плеера, а не у того, кто уходит.
+         */
+        (context as? MainActivity)?.applyKeepAwake()
 
         if (MiniPlayer.videoId != videoId) {
             PlayerEngine.release()

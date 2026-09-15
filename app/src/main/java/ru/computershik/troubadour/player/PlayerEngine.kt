@@ -1084,6 +1084,28 @@ object PlayerEngine {
         get() = player?.playWhenReady == true
 
     /**
+     * Идёт ли показ прямо сейчас — в том смысле, в каком это важно
+     * экрану: пока идёт, гасить его нельзя.
+     *
+     * Одного `playWhenReady` мало. Он остаётся поднятым и после конца
+     * ролика, и у плеера, который ещё ничего не открыл, — а держать
+     * экран разбуженным ради доигравшего ролика незачем. Поэтому
+     * спрашиваем ещё и состояние: годятся только «играю» и «набираю».
+     */
+    val holdsScreen: Boolean
+        get() {
+            val ready = player ?: return false
+
+            if (!ready.playWhenReady) {
+                return false
+            }
+
+            val state = ready.playbackState
+
+            return state == Player.STATE_READY || state == Player.STATE_BUFFERING
+        }
+
+    /**
      * Ждёт ли плеер сейчас данных.
      *
      * Спрашивается тогда, когда о смене состояния уже не узнать: страницу
