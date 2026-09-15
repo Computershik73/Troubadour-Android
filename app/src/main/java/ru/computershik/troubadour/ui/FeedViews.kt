@@ -488,3 +488,84 @@ class ChipView(context: Context) : PillButton(context) {
         private var told = false
     }
 }
+
+/**
+ * Заголовок полки в ленте — «Live Now», «Recent Live Streams».
+ *
+ * Размер тот же, что у заголовков на «Моём» (18 SemiBold): полка
+ * и там, и здесь означает одно и то же — часть ленты со своим именем,
+ * и разнобой в кеглях читался бы как разница по смыслу.
+ */
+class ShelfHeadView(context: Context) : android.widget.FrameLayout(context) {
+
+    private val text = label(context, Fonts.semiBold, 18f, Theme.primaryText, 1)
+
+    var caption: String = ""
+        set(value) {
+            field = value
+
+            text.text = value
+        }
+
+    init {
+        addView(
+            text,
+            LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
+
+        setPadding(dp(8f), dp(12f), dp(8f), dp(6f))
+    }
+
+    fun repaint() {
+        text.setTextColor(Theme.primaryText)
+    }
+}
+
+/**
+ * «Показать ещё» под полкой.
+ *
+ * Полка листается своим токеном, отдельно от ленты, и кнопка — весь
+ * доступный для этого ход: телевизор возит полку вбок пальцем, а у нас
+ * плитки лежат рядами и возить нечего.
+ */
+class ShelfMoreView(context: Context) : TappableView(context) {
+
+    private val text = label(context, Fonts.medium, 14f, Theme.ACCENT_BLUE, 1)
+
+    var caption: String = ""
+        set(value) {
+            field = value
+
+            text.text = value
+        }
+
+    init {
+        highlights = true
+
+        text.gravity = Gravity.CENTER
+
+        addView(
+            text,
+            LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+    }
+
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        setMeasuredDimension(
+            MeasureSpec.getSize(widthMeasureSpec),
+            dp(44f)
+        )
+
+        measureChildren(widthMeasureSpec, heightMeasureSpec)
+    }
+
+    fun repaint() {
+        text.setTextColor(Theme.ACCENT_BLUE)
+    }
+}

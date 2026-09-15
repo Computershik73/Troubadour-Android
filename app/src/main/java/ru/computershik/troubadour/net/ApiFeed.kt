@@ -22,8 +22,15 @@ object SearchKind {
     const val PLAYLISTS = 3
 }
 
-/** Таблетка над лентой: название и поисковый запрос за ней. */
-class HomeCategory(val title: String, val query: String)
+/**
+ * Таблетка над лентой: название и то, что за ней стоит.
+ *
+ * У всех, кроме двух, это поисковый запрос [query]. У «Всех» пусто —
+ * это сама лента. У «Сейчас в эфире» вместо запроса стоит [browse]:
+ * поиск по слову «live» приносит что угодно, кроме идущих трансляций,
+ * а раздел `FEtopics_live` отвечает ровно ими.
+ */
+class HomeCategory(val title: String, val query: String, val browse: String = "")
 
 /**
  * Лента «Главной». [continuation] — токен следующей страницы либо null
@@ -115,6 +122,12 @@ fun Api.trendingQueries(): List<String> = listOf(
 
 fun Api.homeCategories(): List<HomeCategory> = listOf(
     HomeCategory(loc("Все"), ""),
+    /**
+     * «Сейчас в эфире» — не поиск, а свой раздел.
+     *
+     * Стоит второй, сразу за «Всеми», — так же, как в вебе.
+     */
+    HomeCategory(loc("Сейчас в эфире"), "", "FEtopics_live"),
     HomeCategory(loc("Фильмы и анимация"), "Film & Animation"),
     HomeCategory(loc("Авто"), "Autos & Vehicles"),
     HomeCategory(loc("Музыка"), "Music"),
@@ -309,4 +322,195 @@ fun Api.searchSuggestions(query: String): List<String> {
     }
 
     return suggestions
+}
+
+/**
+ * Полка ленты: заголовок и плитки под ним.
+ *
+ * Изменяемая намеренно — у полки под кнопкой «Показать ещё» меняются
+ * и список, и токен. [more] пуст, когда листать больше нечего.
+ */
+class Shelf(val title: String, val items: MutableList<VideoItem>, var more: String?)
+
+/** Лента, пришедшая полками: плоский список, токен и сами полки. */
+class ShelfFeed(
+    val items: List<VideoItem>,
+    val continuation: String?,
+    val groups: List<Shelf>
+)
+
+/**
+ * Токен из старого списка `continuations`.
+ *
+ * Берётся **у названного узла**, а не первый попавшийся в дереве — в этом
+ * вся разница. У телевизора на странице эфиров таких списков сразу два
+ * вида, и они ведут в разные стороны (см. [liveContinuationIn]).
+ */
+private fun Api.listTokenIn(node: JSONObject?): String? {
+    val first = Json.objectAt(Json.array(node, "continuations"), 0)
+
+    Json.text(Json.obj(first, "nextContinuationData"), "continuation")?.let {
+        return it
+    }
+
+    return Json.text(Json.obj(first, "reloadContinuationData"), "continuation")
+}
+
+/**
+ * Продолжение страницы эфиров — вниз, а не вбок.
+ *
+ * На странице `FEtopics_live` живут два разных продолжения:
+ *
+ *   `sectionListRenderer.continuations` — следующие **полки**;
+ *
+ *   `shelfRenderer.content.horizontalListRenderer.continuations` —
+ *       следующие плитки **одной полки**, по пять штук. Ими телевизор
+ *       возит полку вбок, оставаясь на месте по вертикали.
+ *
+ * Общий [Api.continuationIn] берёт первый попавшийся и попадает
+ * на полочный. Оттого лента и превращается в бесконечный ряд без
+ * заголовков: тянется вбок одна-единственная полка — в журнале это видно
+ * как десяток ответов по восемь килобайт и по пять роликов подряд.
+ */
+private fun Api.liveContinuationIn(json: JSONObject): String? {
+    val contents = Json.obj(json, "continuationContents")
+
+    // Ответ на полочный токен: следующий такой же, и он полочный.
+    val horizontal = Json.obj(contents, "horizontalListContinuation")
+
+    if (horizontal != null) {
+        return listTokenIn(horizontal)
+    }
+
+    val section = Json.obj(contents, "sectionListContinuation")
+        ?: Json.findFirst("sectionListRenderer", json, 200000)
+
+    listTokenIn(section)?.takeIf { it.isNotEmpty() }?.let { return it }
+
+    // Безымянному отвечает веб, а у него продолжение обычного вида.
+    return continuationIn(json)
+}
+
+/**
+ * Полки ответа: заголовок и плитки под ним.
+ *
+ * Разбор тот же, что у «Истории» с её днями, но заголовок у телевизора
+ * лежит двумя ступенями глубже: не `shelfHeaderRenderer.title`, а
+ * `shelfHeaderRenderer.avatarLockup.avatarLockupRenderer.title` — рядом
+ * с кружком канала. Оттого полки и «не находились», хотя в журнале
+ * честно значились и `shelfRenderer`, и `avatarLockupRenderer`.
+ */
+private fun Api.shelvesIn(json: JSONObject): List<Shelf> {
+    val groups = ArrayList<Shelf>()
+    val seen = HashSet<String>()
+
+    val names = setOf("shelfRenderer", "richShelfRenderer", "itemSectionRenderer")
+
+    for (hit in Json.findAllOfAny(names, json, 200000)) {
+        val node = hit.node
+
+        var title = Json.renderedText(node, "title")
+
+        if (title.isNullOrEmpty()) {
+            for (name in listOf(
+                "shelfHeaderRenderer", "richShelfHeaderRenderer", "headerRenderer"
+            )) {
+                title = Json.renderedText(Json.findFirst(name, node, 400), "title")
+
+                if (!title.isNullOrEmpty()) {
+                    break
+                }
+            }
+        }
+
+        if (title.isNullOrEmpty()) {
+            val lockup = Json.findFirst(
+                "avatarLockupRenderer", Json.obj(node, "headerRenderer"), 400
+            )
+
+            title = Json.renderedText(lockup, "title")
+        }
+
+        if (title.isNullOrEmpty()) {
+            continue
+        }
+
+        val items = ArrayList<VideoItem>()
+
+        for (item in VideoItem.parseFrom(node)) {
+            val key = item.videoId?.takeIf { it.isNotEmpty() } ?: item.title
+
+            if (key.isEmpty() || !seen.add(key)) {
+                continue
+            }
+
+            items.add(item)
+        }
+
+        if (items.isEmpty()) {
+            continue
+        }
+
+        /**
+         * Полка листается отдельно от ленты — своим токеном.
+         *
+         * Телевизор возит полку вбок по пять плиток; у нас полки лежат
+         * рядами, и тот же токен даёт кнопку «Показать ещё» под полкой.
+         * Ленту он не двигает: для неё есть свой, вертикальный.
+         */
+        val more = listTokenIn(
+            Json.obj(Json.obj(node, "content"), "horizontalListRenderer")
+        )
+
+        groups.add(Shelf(title, items, more?.takeIf { it.isNotEmpty() }))
+    }
+
+    return groups
+}
+
+/**
+ * Вкладка «Сейчас в эфире» — это `FEtopics_live` у TV-клиента.
+ *
+ * У вошедшего и у безымянного разные двери. `FEtopics_live` — раздел
+ * телевизора, и он требует токена: без входа не отвечает вовсе.
+ * Безымянному эфиры отдаёт канал `UC4R8DWoMoI7CAwX8_LjQHig` — это и есть
+ * youtube.com/live, куда браузер попадает без всякой подписи.
+ *
+ * Полки у них разные по виду, но не по смыслу: у телевизора
+ * `shelfRenderer`, у веба `richShelfRenderer`. Разбор знает оба.
+ */
+fun Api.liveFeed(continuation: String?): ShelfFeed? {
+    val signedIn = Auth.isSignedIn()
+
+    val body = JSONObject()
+
+    if (!continuation.isNullOrEmpty()) {
+        body.put("continuation", continuation)
+    } else {
+        body.put(
+            "browseId",
+            if (signedIn) "FEtopics_live" else "UC4R8DWoMoI7CAwX8_LjQHig"
+        )
+    }
+
+    val json = post(
+        "browse", body, if (signedIn) "TVHTML5" else "WEB", signedIn, 0.0
+    ) ?: return null
+
+    val feed = feedFrom(json) ?: Api.Feed(emptyList(), null)
+
+    /**
+     * Продолжение переписываем: [Api.feedFrom] берёт первое попавшееся,
+     * а здесь их два вида и путать их нельзя.
+     */
+    val token = liveContinuationIn(json)?.takeIf { it.isNotEmpty() }
+
+    val groups = shelvesIn(json)
+
+    Log.d {
+        "[YouTube/Эфиры] полок ${groups.size}, плиток ${feed.items.size}, " +
+            "продолжение ${if (token != null) "есть" else "нет"}"
+    }
+
+    return ShelfFeed(feed.items, token, groups)
 }

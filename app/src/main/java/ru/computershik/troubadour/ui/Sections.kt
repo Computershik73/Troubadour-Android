@@ -16,6 +16,7 @@ import ru.computershik.troubadour.net.HomeCategory
 import ru.computershik.troubadour.net.SearchKind
 import ru.computershik.troubadour.net.homeCategories
 import ru.computershik.troubadour.net.homeFeed
+import ru.computershik.troubadour.net.liveFeed
 import ru.computershik.troubadour.net.channelTab
 import ru.computershik.troubadour.net.search
 import ru.computershik.troubadour.net.subscriptions
@@ -220,6 +221,18 @@ class HomeSection(context: Context) : Shell.Section(context) {
      */
     private fun loadPage(token: String?): FeedList.Page? {
         val category = categories.getOrNull(chosen)
+
+        /**
+         * «Сейчас в эфире» — свой раздел, отвечающий полками.
+         *
+         * Поиск тут не годится вовсе: по слову «live» приходит что
+         * угодно, кроме идущих трансляций.
+         */
+        if (category != null && category.browse.isNotEmpty()) {
+            val page = Api.liveFeed(token) ?: return null
+
+            return FeedList.Page(page.items, page.continuation, page.groups)
+        }
 
         if (category != null && category.query.isNotEmpty()) {
             val page = Api.search(category.query, token, SearchKind.VIDEOS) ?: return null

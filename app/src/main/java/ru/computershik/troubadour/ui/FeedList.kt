@@ -7,9 +7,12 @@ import android.view.ViewGroup
 import android.widget.BaseAdapter
 import android.widget.FrameLayout
 import android.widget.ListView
+import ru.computershik.troubadour.Log
 import ru.computershik.troubadour.Notify
 import ru.computershik.troubadour.loc
 import ru.computershik.troubadour.model.VideoItem
+import ru.computershik.troubadour.net.Api
+import ru.computershik.troubadour.net.Shelf
 import ru.computershik.troubadour.ui.Metrics.dp
 
 /**
@@ -26,8 +29,29 @@ import ru.computershik.troubadour.ui.Metrics.dp
  */
 class FeedList(context: Context) : FrameLayout(context) {
 
-    /** Откуда брать страницу. Возвращает карточки и токен следующей. */
-    class Page(val items: List<VideoItem>, val continuation: String?)
+    /**
+     * Откуда брать страницу: карточки, токен следующей и — если лента
+     * приходит полками — сами полки.
+     *
+     * Полки и плоский список не спорят: когда полки есть, список
+     * раскладывается ими, а [items] остаётся для счёта и для тех, кому
+     * нужен весь набор целиком.
+     */
+    class Page(
+        val items: List<VideoItem>,
+        val continuation: String?,
+        val groups: List<Shelf> = emptyList()
+    )
+
+    /**
+     * Строка списка. Ровно одно из трёх: ряд карточек, заголовок полки
+     * либо кнопка «Показать ещё» под полкой с номером [shelf].
+     */
+    private class Row(
+        val cards: List<VideoItem>? = null,
+        val title: String? = null,
+        val shelf: Int = -1
+    )
 
     /** «Потяните, чтобы обновить» — над списком. */
     private val refresh = RefreshHeader(context)
@@ -72,8 +96,19 @@ class FeedList(context: Context) : FrameLayout(context) {
     private val list = ListView(context)
     private val status = StatusView(context)
 
-    private val rows = ArrayList<List<VideoItem>>()
+    private val rows = ArrayList<Row>()
     private val items = ArrayList<VideoItem>()
+
+    /**
+     * Полки ленты — пусто у обычной.
+     *
+     * Складываются изменяемыми: у полки под кнопкой «Показать ещё»
+     * меняются и список плиток, и токен.
+     */
+    private val groups = ArrayList<Shelf>()
+
+    /** Номера полок, которые сейчас дочитываются. */
+    private val loadingShelves = HashSet<Int>()
 
     private val pager = Pager()
     private val generation = Generation()
@@ -98,10 +133,21 @@ class FeedList(context: Context) : FrameLayout(context) {
 
         override fun getItemId(position: Int): Long = position.toLong()
 
-        override fun getViewTypeCount(): Int = 2
+        override fun getViewTypeCount(): Int = 4
 
-        override fun getItemViewType(position: Int): Int =
-            if (header != null && position == 0) 0 else 1
+        override fun getItemViewType(position: Int): Int {
+            if (header != null && position == 0) {
+                return 0
+            }
+
+            val row = rowAt(position) ?: return 1
+
+            return when {
+                row.title != null -> 2
+                row.shelf >= 0 -> 3
+                else -> 1
+            }
+        }
 
         override fun getView(position: Int, convert: View?, parent: ViewGroup): View {
             val top = header
@@ -110,14 +156,49 @@ class FeedList(context: Context) : FrameLayout(context) {
                 return top
             }
 
-            val index = if (top != null) position - 1 else position
+            val row = rowAt(position)
 
-            val row = (convert as? FeedRow) ?: FeedRow(context)
+            if (row?.title != null) {
+                val head = (convert as? ShelfHeadView) ?: ShelfHeadView(context)
 
-            row.bind(rows.getOrElse(index) { emptyList() }, columns, thumbRadius)
+                head.caption = row.title
 
-            return row
+                // Цвет спрашивается у темы в миг показа: вид переиспользуется.
+                head.repaint()
+
+                return head
+            }
+
+            if (row != null && row.shelf >= 0) {
+                val button = (convert as? ShelfMoreView) ?: ShelfMoreView(context)
+
+                val index = row.shelf
+
+                button.caption = if (loadingShelves.contains(index)) {
+                    loc("Загрузка…")
+                } else {
+                    loc("Показать ещё")
+                }
+
+                button.onTap = { loadMoreInShelf(index) }
+
+                button.repaint()
+
+                return button
+            }
+
+            val cards = (convert as? FeedRow) ?: FeedRow(context)
+
+            cards.bind(row?.cards ?: emptyList(), columns, thumbRadius)
+
+            return cards
         }
+    }
+
+    private fun rowAt(position: Int): Row? {
+        val index = if (header != null) position - 1 else position
+
+        return rows.getOrNull(index)
     }
 
     init {
@@ -202,6 +283,8 @@ class FeedList(context: Context) : FrameLayout(context) {
 
         rows.clear()
         items.clear()
+        groups.clear()
+        loadingShelves.clear()
 
         adapter.notifyDataSetChanged()
 
@@ -262,7 +345,7 @@ class FeedList(context: Context) : FrameLayout(context) {
 
                 pager.token = page.continuation ?: ""
 
-                append(page.items)
+                append(page.items, page.groups)
 
                 status.hide()
 
@@ -273,9 +356,43 @@ class FeedList(context: Context) : FrameLayout(context) {
         }
     }
 
-    private fun append(fresh: List<VideoItem>) {
-        if (fresh.isEmpty()) {
+    /**
+     * Лента с полками дочитывается полками же.
+     *
+     * Вертикальное продолжение вкладки эфиров несёт следующие полки
+     * со своими заголовками — «Upcoming Live Streams», «Live Now — News»
+     * и прочие. Сложи их в общий список, и сразу после третьей полки
+     * началась бы мешанина без заголовков.
+     *
+     * Плитки без полок (так отвечает веб безымянному) уходят в хвостовую
+     * полку без заголовка: иначе они пополняли бы [items], на которые
+     * раскладка с полками не смотрит.
+     */
+    private fun append(fresh: List<VideoItem>, shelves: List<Shelf> = emptyList()) {
+        if (fresh.isEmpty() && shelves.isEmpty()) {
             adapter.notifyDataSetChanged()
+
+            return
+        }
+
+        if (groups.isNotEmpty() || shelves.isNotEmpty()) {
+            if (shelves.isNotEmpty()) {
+                groups.addAll(shelves)
+            } else {
+                var tail = groups.lastOrNull()
+
+                if (tail == null || tail.title.isNotEmpty()) {
+                    tail = Shelf("", ArrayList(), null)
+
+                    groups.add(tail)
+                }
+
+                tail.items.addAll(fresh)
+            }
+
+            items.addAll(fresh)
+
+            rebuildRows()
 
             return
         }
@@ -283,6 +400,73 @@ class FeedList(context: Context) : FrameLayout(context) {
         items.addAll(fresh)
 
         rebuildRows()
+    }
+
+    /**
+     * «Показать ещё» под полкой.
+     *
+     * Телевизор возит полку вбок и берёт по пять плиток за раз; пять —
+     * это на нашу сетку два с половиной ряда, и на одно нажатие такой
+     * добавки жалко. Поэтому за нажатие спрашиваем до четырёх страниц
+     * подряд — около двадцати плиток — или пока полка не кончится.
+     */
+    private fun loadMoreInShelf(index: Int) {
+        val shelf = groups.getOrNull(index) ?: return
+        val token = shelf.more?.takeIf { it.isNotEmpty() } ?: return
+
+        if (!loadingShelves.add(index)) {
+            return
+        }
+
+        rebuildRows()
+
+        val fetch = source ?: return
+        val mark = generation.current
+
+        async {
+            val fetched = ArrayList<VideoItem>()
+
+            var next: String? = token
+            var page = 0
+
+            while (page < 4 && !next.isNullOrEmpty()) {
+                val step = fetch(next)
+
+                if (step == null || step.items.isEmpty()) {
+                    next = null
+
+                    break
+                }
+
+                fetched.addAll(step.items)
+
+                next = step.continuation
+
+                page += 1
+            }
+
+            val tail = next
+
+            main {
+                if (!generation.isCurrent(mark)) {
+                    return@main
+                }
+
+                loadingShelves.remove(index)
+
+                shelf.more = tail?.takeIf { it.isNotEmpty() }
+                shelf.items.addAll(fetched)
+
+                items.addAll(fetched)
+
+                Log.d {
+                    "[YouTube/Лента] Полка «${shelf.title}»: +${fetched.size}, " +
+                        "всего ${shelf.items.size}, ещё ${if (shelf.more != null) "есть" else "нет"}"
+                }
+
+                rebuildRows()
+            }
+        }
     }
 
     /**
@@ -303,10 +487,47 @@ class FeedList(context: Context) : FrameLayout(context) {
 
         rows.clear()
 
+        /**
+         * Лента с полками раскладывается по-другому: заголовок отдельной
+         * строкой, под ним ряды его плиток, а если полку есть чем
+         * дочитать — кнопка под ней.
+         */
+        if (groups.isNotEmpty()) {
+            for (index in groups.indices) {
+                val shelf = groups[index]
+
+                if (shelf.title.isNotEmpty()) {
+                    rows.add(Row(title = shelf.title))
+                }
+
+                var at = 0
+
+                while (at < shelf.items.size) {
+                    rows.add(
+                        Row(
+                            cards = shelf.items.subList(
+                                at, minOf(at + columns, shelf.items.size)
+                            )
+                        )
+                    )
+
+                    at += columns
+                }
+
+                if (!shelf.more.isNullOrEmpty() || loadingShelves.contains(index)) {
+                    rows.add(Row(shelf = index))
+                }
+            }
+
+            adapter.notifyDataSetChanged()
+
+            return
+        }
+
         var index = 0
 
         while (index < items.size) {
-            rows.add(items.subList(index, minOf(index + columns, items.size)))
+            rows.add(Row(cards = items.subList(index, minOf(index + columns, items.size))))
 
             index += columns
         }
@@ -317,7 +538,7 @@ class FeedList(context: Context) : FrameLayout(context) {
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
 
-        if (w != oldw && items.isNotEmpty()) {
+        if (w != oldw && (items.isNotEmpty() || groups.isNotEmpty())) {
             rebuildRows()
         }
     }
