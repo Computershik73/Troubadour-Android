@@ -5,6 +5,7 @@ import android.content.Intent
 import android.graphics.Color
 import android.text.TextUtils
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
@@ -694,6 +695,61 @@ class PlayerScreen(
         subtitleLabel.setPadding(dp(8f), dp(4f), dp(8f), dp(4f))
         subtitleLabel.gravity = Gravity.CENTER
         subtitleLabel.visibility = View.GONE
+
+        /**
+         * Строку субтитров двигают пальцем, и место запоминается.
+         *
+         * Держим это на самой строке, а не на кадре: касание, начатое
+         * на ней, кадру уже не достаётся, и пульт от такого движения
+         * не мигает.
+         */
+        subtitleLabel.setOnTouchListener(object : View.OnTouchListener {
+
+            private var fromX = 0f
+            private var fromY = 0f
+            private var moved = false
+
+            override fun onTouch(view: View, event: MotionEvent): Boolean {
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        fromX = event.rawX
+                        fromY = event.rawY
+                        moved = false
+                    }
+
+                    MotionEvent.ACTION_MOVE -> {
+                        val box = stage.width
+                        val tall = stage.height
+
+                        if (box <= 0 || tall <= 0) {
+                            return true
+                        }
+
+                        val shiftX = event.rawX - fromX
+                        val shiftY = event.rawY - fromY
+
+                        if (!moved &&
+                            kotlin.math.abs(shiftX) < dp(4f) &&
+                            kotlin.math.abs(shiftY) < dp(4f)
+                        ) {
+                            return true
+                        }
+
+                        moved = true
+
+                        fromX = event.rawX
+                        fromY = event.rawY
+
+                        Settings.subtitlePlaceX += shiftX / box
+                        Settings.subtitlePlace += shiftY / tall
+
+                        placeSubtitle()
+                    }
+                }
+
+                return true
+            }
+        })
 
         // Свои дети у кадра кончились — дальше идёт наше.
         stage.sealOwnChildren()
@@ -2086,13 +2142,54 @@ class PlayerScreen(
             return
         }
 
+        val fresh = subtitleLabel.text?.toString() != cue.text
+
         subtitleLabel.text = cue.text
         subtitleLabel.visibility = View.VISIBLE
 
-        val params = subtitleLabel.layoutParams as? FrameLayout.LayoutParams ?: return
+        /**
+         * Строка сменилась — её размер станет известен только после
+         * раскладки, а место считается от него. Поэтому ставим дважды:
+         * сейчас по прежнему размеру и ещё раз, когда новый измерят.
+         */
+        placeSubtitle()
 
-        params.topMargin = (stage.height * Settings.subtitlePlace).toInt() -
-            subtitleLabel.height / 2
+        if (fresh) {
+            subtitleLabel.post { placeSubtitle() }
+        }
+    }
+
+    /**
+     * Ставит строку субтитров по запомненному месту.
+     *
+     * Место хранится долями от кадра, а не точками: при повороте строка
+     * должна остаться там же по смыслу, а не уехать за край. Доли
+     * указывают на **середину** строки, поэтому и вычитаем половину её
+     * размера — иначе перетаскивание уводило бы строку рывком на пол-её
+     * ширины.
+     */
+    private fun placeSubtitle() {
+        val params = subtitleLabel.layoutParams as? ViewGroup.MarginLayoutParams ?: return
+
+        val box = stage.width
+        val tall = stage.height
+
+        if (box <= 0 || tall <= 0) {
+            return
+        }
+
+        // Шире девяти десятых кадра строку не пускаем — пусть переносится.
+        val cap = (box * 0.9).toInt()
+
+        if (subtitleLabel.maxWidth != cap) {
+            subtitleLabel.maxWidth = cap
+        }
+
+        val left = (box * Settings.subtitlePlaceX).toInt() - subtitleLabel.width / 2
+        val top = (tall * Settings.subtitlePlace).toInt() - subtitleLabel.height / 2
+
+        params.leftMargin = left.coerceIn(0, maxOf(0, box - subtitleLabel.width))
+        params.topMargin = top.coerceIn(0, maxOf(0, tall - subtitleLabel.height))
 
         subtitleLabel.layoutParams = params
     }
