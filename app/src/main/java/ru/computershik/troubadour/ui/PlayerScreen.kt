@@ -695,6 +695,9 @@ class PlayerScreen(
         subtitleLabel.gravity = Gravity.CENTER
         subtitleLabel.visibility = View.GONE
 
+        // Свои дети у кадра кончились — дальше идёт наше.
+        stage.sealOwnChildren()
+
         stage.addView(
             subtitleLabel,
             FrameLayoutParamsForSubtitles()

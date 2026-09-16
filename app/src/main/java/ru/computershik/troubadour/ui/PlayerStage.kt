@@ -877,6 +877,11 @@ class PlayerStage(context: Context) : ViewGroup(context) {
 
     // --- Раскладка --------------------------------------------------------
 
+    /** Свои дети кончились — всё, что дальше, пришло снаружи. */
+    fun sealOwnChildren() {
+        ownChildren = childCount
+    }
+
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
         val width = MeasureSpec.getSize(widthMeasureSpec)
 
@@ -931,6 +936,8 @@ class PlayerStage(context: Context) : ViewGroup(context) {
         measureExactly(rewindMark, side, side)
         measureExactly(forwardMark, side, side)
 
+        measureGuests(width, height)
+
         timeLabel.measure(
             MeasureSpec.makeMeasureSpec(width, MeasureSpec.AT_MOST),
             MeasureSpec.makeMeasureSpec(dp(30f), MeasureSpec.EXACTLY)
@@ -949,6 +956,64 @@ class PlayerStage(context: Context) : ViewGroup(context) {
             MeasureSpec.makeMeasureSpec(width - dp(16f), MeasureSpec.AT_MOST),
             MeasureSpec.makeMeasureSpec(height, MeasureSpec.AT_MOST)
         )
+    }
+
+    /**
+     * Виды, добавленные снаружи, — например строка субтитров.
+     *
+     * Кадр укладывает своих детей поимённо, а не подряд, и о чужих
+     * не знает вовсе: добавленный снаружи вид не меряется и не кладётся,
+     * остаётся нулевого размера и не виден никогда. Ровно это и случилось
+     * с субтитрами: дорожка грузилась, реплики находились, а на экране
+     * не было ничего.
+     *
+     * Своих детей кадр заводит при создании; всё, что появилось после,
+     * считаем чужим и укладываем по полям — так же, как это сделал бы
+     * `FrameLayout`, чьи `LayoutParams` им и назначены.
+     */
+    private var ownChildren = 0
+
+    private fun guestChildren(): List<View> {
+        if (childCount <= ownChildren) {
+            return emptyList()
+        }
+
+        return (ownChildren until childCount).map { getChildAt(it) }
+    }
+
+    private fun measureGuests(width: Int, height: Int) {
+        for (view in guestChildren()) {
+            if (view.visibility == GONE) {
+                continue
+            }
+
+            val params = view.layoutParams as? MarginLayoutParams
+
+            val sides = (params?.leftMargin ?: 0) + (params?.rightMargin ?: 0)
+
+            view.measure(
+                MeasureSpec.makeMeasureSpec(maxOf(0, width - sides), MeasureSpec.AT_MOST),
+                MeasureSpec.makeMeasureSpec(height, MeasureSpec.AT_MOST)
+            )
+        }
+    }
+
+    private fun layoutGuests(width: Int) {
+        for (view in guestChildren()) {
+            if (view.visibility == GONE) {
+                continue
+            }
+
+            val params = view.layoutParams as? MarginLayoutParams
+
+            val left = params?.leftMargin ?: 0
+            val top = params?.topMargin ?: 0
+
+            // Шире отведённого не растягиваем: строка стоит по центру.
+            val span = minOf(view.measuredWidth, maxOf(0, width - left))
+
+            view.layout(left, top, left + span, top + view.measuredHeight)
+        }
     }
 
     private fun measureExactly(view: View, width: Int, height: Int) {
@@ -998,6 +1063,8 @@ class PlayerStage(context: Context) : ViewGroup(context) {
         )
 
         blind.frame(0, 0, width, height)
+
+        layoutGuests(width)
 
         // Нижняя полоса — высота 80.
         /**
