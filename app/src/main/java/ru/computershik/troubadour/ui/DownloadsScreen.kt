@@ -25,7 +25,19 @@ import java.io.File
  * либо размер готового файла. Нажатие открывает файл системным плеером,
  * долгое — предлагает удалить.
  */
-class DownloadsScreen(context: Context) : Screen(context) {
+/**
+ * [openAtOnce] — ролик, который надо открыть сразу по приходе.
+ *
+ * Нужно полосе скачанного на «Моём»: там за плиткой лежит готовый файл,
+ * и открывать вместо него сетевую страницу — значит качать заново уже
+ * скачанное, а в дороге без сети и вовсе остаться ни с чем. Экран при
+ * этом всё равно показывается: человек видит, что у него есть, и может
+ * выбрать другое качество.
+ */
+class DownloadsScreen(
+    context: Context,
+    private val openAtOnce: String? = null
+) : Screen(context) {
 
     private lateinit var header: ScreenHeader
     private lateinit var list: ListView
@@ -49,6 +61,9 @@ class DownloadsScreen(context: Context) : Screen(context) {
             return row
         }
     }
+
+    /** Открыли по нажатию с полосы — делаем это один раз. */
+    private var opened = false
 
     override fun build(root: FrameLayout) {
         val column = LinearLayout(context)
@@ -120,6 +135,13 @@ class DownloadsScreen(context: Context) : Screen(context) {
             status.showMessage(loc("Ничего не скачано"))
         } else {
             status.hide()
+        }
+
+        // Пришли открыть названное — открываем, но только один раз.
+        if (!opened && !openAtOnce.isNullOrEmpty()) {
+            opened = true
+
+            items.firstOrNull { it.videoId == openAtOnce }?.let { open(it) }
         }
     }
 

@@ -234,6 +234,16 @@ class MeBody(context: Context) : ViewGroup(context) {
 
         addView(downloadsHeader)
 
+        /**
+         * Скачанное открывается файлом, а не сетевой страницей.
+         *
+         * Плитка тут та же, что у истории, и по нажатию она уходила
+         * на страницу ролика — то есть качала заново уже скачанное.
+         */
+        downloadsRow.onPick = { item ->
+            Nav.push(DownloadsScreen(context, item.videoId))
+        }
+
         addStrip(downloadsStrip, downloadsRow)
 
         playlistsTitle.visibility = GONE
@@ -500,6 +510,9 @@ class TileRow(context: Context) : ViewGroup(context) {
 
     private val tiles = ArrayList<HistoryTile>()
 
+    /** Чем отзываться на нажатие; пусто — обычным переходом. */
+    var onPick: ((VideoItem) -> Unit)? = null
+
     fun fill(items: List<VideoItem>) {
         while (tiles.size < items.size) {
             val tile = HistoryTile(context)
@@ -514,6 +527,7 @@ class TileRow(context: Context) : ViewGroup(context) {
 
             if (index < items.size) {
                 tile.visibility = VISIBLE
+                tile.onPick = onPick
                 tile.bind(items[index])
             } else {
                 tile.visibility = GONE
@@ -577,6 +591,15 @@ class HistoryTile(context: Context) : TappableView(context) {
 
     private var watchedShare = 0.0
 
+    /**
+     * Своё дело по нажатию — вместо обычного перехода на страницу.
+     *
+     * Нужно полосе скачанного: там за плиткой лежит готовый файл,
+     * и открывать вместо него сетевую страницу — значит качать заново
+     * то, что уже скачано, да ещё и в дороге без сети.
+     */
+    var onPick: ((VideoItem) -> Unit)? = null
+
     private var item: VideoItem? = null
 
     init {
@@ -605,7 +628,11 @@ class HistoryTile(context: Context) : TappableView(context) {
             val chosen = item
 
             if (chosen != null) {
-                if (chosen.isPlaylist) {
+                val own = onPick
+
+                if (own != null) {
+                    own(chosen)
+                } else if (chosen.isPlaylist) {
                     Nav.openPlaylist(chosen.playlistId, chosen.title)
                 } else {
                     Nav.openVideo(
