@@ -2213,6 +2213,31 @@ class PlayerScreen(
         }
     }
 
+    /** Развёрнут ли кадр — меню спрашивает, показывать ли подгон. */
+    fun isFullscreen(): Boolean = fullscreen
+
+    fun fillsScreen(): Boolean = stage.fillsScreen
+
+    /**
+     * Переключает подгон кадра: поля или обрезанные края.
+     *
+     * Увеличение при этом сбрасывается — иначе одно нажатие меняло бы
+     * сразу две вещи, и понять, отчего кадр стал другим, было бы нельзя.
+     */
+    fun toggleFillsScreen() {
+        stage.resetZoom()
+
+        stage.fillsScreen = !stage.fillsScreen
+
+        Log.d {
+            "[YouTube/Плеер] Кадр " + if (stage.fillsScreen) {
+                "растянут по экрану — поля убраны, края обрезаны"
+            } else {
+                "вписан целиком — поля вернулись"
+            }
+        }
+    }
+
     fun tracks(): List<SubtitleTrack> = subtitleTracks
 
     fun currentSubtitleTrack(): SubtitleTrack? = subtitleTrack
