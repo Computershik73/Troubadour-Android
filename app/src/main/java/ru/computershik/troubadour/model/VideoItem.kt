@@ -499,9 +499,25 @@ class VideoItem {
          * и о просмотрах с других устройств, и о том, что ролик досмотрен.
          */
         private fun resumeAtIn(renderer: JSONObject?): Double {
-            val watch = Json.findFirst("watchEndpoint", renderer, 600)
+            /**
+             * Берём не первый попавшийся переход, а тот, где место
+             * названо.
+             *
+             * `watchEndpoint` у карточки не один: первым лежит обычный
+             * переход к ролику, и секунды в нём нет — она стоит у того,
+             * что рядом с долей просмотра. Прежний разбор брал первый
+             * и получал ноль, а ролик начинался сначала, хотя сервер
+             * честно присылал и долю, и секунду.
+             */
+            for (watch in Json.findAll("watchEndpoint", renderer, 600)) {
+                val at = Json.int(watch, "startTimeSeconds")
 
-            return Json.int(watch, "startTimeSeconds").toDouble()
+                if (at > 0) {
+                    return at.toDouble()
+                }
+            }
+
+            return 0.0
         }
 
         /** Разбор одного рендерера в карточку; null, если это не ролик. */
