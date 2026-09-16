@@ -707,7 +707,24 @@ private fun Api.channelFrom(body: JSONObject): ChannelPage? {
 
     val pageHeader = Json.findFirst("pageHeaderViewModel", json, 4000)
 
-    val bannerNode = Json.obj(Json.obj(pageHeader, "banner"), "imageBannerViewModel")
+    /**
+     * Подложка канала ищется по имени своего вида, а не по пути.
+     *
+     * Путь `pageHeaderViewModel.banner.imageBannerViewModel` держался
+     * на том, что шапка найдётся первой. На живом ответе она не нашлась
+     * вовсе — обход упирался в потолок в четыре тысячи узлов, — хотя
+     * сама подложка в ответе была: проверка показала и `banner`,
+     * и `imageBannerViewModel` среди ключей. Оттого баннера у каналов
+     * не бывало никогда.
+     *
+     * Имя вида однозначно, и искать по нему надёжнее пути: у ответа
+     * меняется обрамление, а имена держатся.
+     */
+    var bannerNode = Json.obj(Json.obj(pageHeader, "banner"), "imageBannerViewModel")
+
+    if (bannerNode == null) {
+        bannerNode = Json.findFirst("imageBannerViewModel", json, 200000)
+    }
 
     result.banner = Json.thumbnail(Json.obj(bannerNode, "image"), "sources", 1024)
         ?: imageIn(json, "banner", 1024)
@@ -716,6 +733,7 @@ private fun Api.channelFrom(body: JSONObject): ChannelPage? {
         "[YouTube/Канал] Шапка: кружок ${if (avatar != null) "есть" else "нет"}, " +
             "подложка ${if (result.banner != null) "есть" else "нет"}"
     }
+
 
     result.description = Json.text(metadata, "description")
 
