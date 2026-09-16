@@ -1164,8 +1164,20 @@ class DownloadQualitySheet(
                 else -> null
             }
 
+            /**
+             * Кадры в подписи — те же, что в меню просмотра.
+             *
+             * Скачивают ту же дорожку, что и смотрят, и звать её здесь
+             * «1080p», а там «1080p60» — значит заставлять человека
+             * гадать, одно ли это и то же. Суффикс, как и там, только
+             * выше тридцати.
+             */
+            val rate = Streams.framesForHeight(height)
+
+            val title = "${height}p" + if (rate > 30) "$rate" else ""
+
             add(
-                row("${height}p", note, chosen) {
+                row(title, note, chosen) {
                     if (busy) {
                         /**
                          * Начатое второй раз не начинают: нажатие здесь

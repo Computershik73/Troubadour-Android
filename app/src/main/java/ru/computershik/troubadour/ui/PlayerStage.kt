@@ -736,11 +736,9 @@ class PlayerStage(context: Context) : ViewGroup(context) {
             override fun onScaleBegin(
                 detector: android.view.ScaleGestureDetector
             ): Boolean {
-                if (!fullscreen) {
-                    return false
-                }
-
                 zoomUsed = false
+                pinchSpan = 1f
+
                 zoomAnchor.set(detector.focusX, detector.focusY)
 
                 return true
@@ -749,7 +747,32 @@ class PlayerStage(context: Context) : ViewGroup(context) {
             override fun onScale(
                 detector: android.view.ScaleGestureDetector
             ): Boolean {
-                if (!fullscreen || zoomUsed) {
+                if (zoomUsed) {
+                    return true
+                }
+
+                pinchSpan *= detector.scaleFactor
+
+                /**
+                 * В окне щипок не увеличивает кадр, а разворачивает его.
+                 *
+                 * Растить кадр в окне некуда: под ним страница, а не
+                 * чернота. Зато сам жест здесь уместен — так же, как
+                 * в iOS-версии, где из окна в полный экран и обратно
+                 * ведёт та же лестница.
+                 *
+                 * Пороги несимметричны нарочно: разводят пальцы
+                 * размашисто, а сводят скупо — пальцы упираются друг
+                 * в друга. Полуторный размах наружу и три четверти
+                 * внутрь примерно равны по усилию.
+                 */
+                if (!fullscreen) {
+                    if (pinchSpan > 1.5f) {
+                        zoomUsed = true
+
+                        onFullscreen?.invoke()
+                    }
+
                     return true
                 }
 
@@ -795,6 +818,28 @@ class PlayerStage(context: Context) : ViewGroup(context) {
                     fillsScreen = true
 
                     onNotice?.invoke(ru.computershik.troubadour.loc("Полосы убраны"))
+
+                    return true
+                }
+
+                /**
+                 * Свели пальцы, а уменьшать уже некуда — значит просят
+                 * выйти.
+                 *
+                 * Сперва возвращаем полосы, и лишь потом выходим
+                 * из полного экрана: иначе одно сведение меняло бы сразу
+                 * две вещи, и вернуть только одну из них было бы нельзя.
+                 */
+                if (scale <= 1f && pinchSpan < 0.75f) {
+                    zoomUsed = true
+
+                    resetZoom()
+
+                    if (fillsScreen) {
+                        fillsScreen = false
+                    } else {
+                        onFullscreen?.invoke()
+                    }
                 }
 
                 return true
@@ -802,9 +847,20 @@ class PlayerStage(context: Context) : ViewGroup(context) {
         }
     )
 
+    /**
+     * Во сколько развели пальцы с начала жеста.
+     *
+     * `ScaleGestureDetector` отдаёт множитель шага, а не всего движения,
+     * — размах приходится копить самим.
+     */
+    private var pinchSpan = 1f
+
     /** Откуда ведут увеличенный кадр одним пальцем. */
     private var dragFrom: android.graphics.PointF? = null
     private var dragged = false
+
+    /** Откуда началась протяжка — для жестов полного экрана. */
+    private val swipeFrom = android.graphics.PointF(0f, 0f)
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
         pinch.onTouchEvent(event)
@@ -862,8 +918,42 @@ class PlayerStage(context: Context) : ViewGroup(context) {
             }
         }
 
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+            swipeFrom.set(event.x, event.y)
+        }
+
         if (event.actionMasked != MotionEvent.ACTION_UP) {
             return true
+        }
+
+        /**
+         * Протяжка вверх разворачивает кадр, вниз — возвращает в окно.
+         *
+         * Порог — восьмая доля высоты кадра и заведомо больше сдвига
+         * вбок: дрожь пальца в такое не укладывается, а намеренное
+         * движение укладывается с запасом. Увеличенный кадр этого жеста
+         * не знает: там та же протяжка возит картинку.
+         */
+        val shiftY = event.y - swipeFrom.y
+        val shiftX = event.x - swipeFrom.x
+
+        val enough = height / 8f
+
+        if (zoomScale <= 1f &&
+            kotlin.math.abs(shiftY) > enough &&
+            kotlin.math.abs(shiftY) > kotlin.math.abs(shiftX)
+        ) {
+            if (shiftY < 0 && !fullscreen) {
+                onFullscreen?.invoke()
+
+                return true
+            }
+
+            if (shiftY > 0 && fullscreen) {
+                onFullscreen?.invoke()
+
+                return true
+            }
         }
 
         if (controlsVisible) {
