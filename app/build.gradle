@@ -27,8 +27,8 @@ android {
         // только для targetSdk ниже 24.
         targetSdkVersion 29
 
-        versionCode 1
-        versionName "1.4"
+        versionCode 2
+        versionName "1.5"
 
         /**
          * Отметка сборки — время, когда собран этот apk.
