@@ -23,9 +23,12 @@ import ru.computershik.troubadour.loc
 import ru.computershik.troubadour.locF
 import ru.computershik.troubadour.net.Api
 import ru.computershik.troubadour.net.Auth
+import ru.computershik.troubadour.net.ChatFilter
+import ru.computershik.troubadour.net.ChatItem
 import ru.computershik.troubadour.net.CommentItem
 import ru.computershik.troubadour.net.WebAuth
 import ru.computershik.troubadour.net.comments
+import ru.computershik.troubadour.net.liveChat
 import ru.computershik.troubadour.net.editComment
 import ru.computershik.troubadour.net.postComment
 import ru.computershik.troubadour.net.replyComment
@@ -87,6 +90,20 @@ class CommentsSheet(
     private lateinit var field: EditText
     private lateinit var composer: View
 
+    /**
+     * Шапка чата: «Чат» строкой, под ним выбор фильтра и счётчик
+     * смотрящих. У комментариев её не было и прежде, и заводить её
+     * задним числом значит менять привычный вид там, где не просили, —
+     * поэтому она показывается только у чата.
+     */
+    private val heading = label(context, Fonts.bold, 17f, Theme.primaryText, 1)
+    private val filterButton = label(context, Fonts.regular, 13f, Theme.secondaryText, 1)
+    private val viewers = label(context, Fonts.regular, 13f, Theme.mutedText, 1)
+
+    /** Закреплённое сообщение — плашка над списком. */
+    private val banner = PillView(context)
+    private val bannerText = label(context, Fonts.regular, 13f, Theme.primaryText, 2)
+
     private val items = ArrayList<CommentItem>()
 
     private var continuation: String? = null
@@ -104,6 +121,15 @@ class CommentsSheet(
     /** Что правим или на что отвечаем; пусто — пишем новый. */
     private var replyTo: CommentItem? = null
     private var editing: CommentItem? = null
+
+    /** Чат трансляции: метка следующей страницы и опрос. */
+    private var chatToken: String? = null
+    private var chatFilters: List<ChatFilter>? = null
+    private var chatFilter = 0
+
+    private val clock = android.os.Handler(android.os.Looper.getMainLooper())
+
+    private val chatTick = Runnable { pollChat() }
 
     private val adapter = object : BaseAdapter() {
 
@@ -133,6 +159,19 @@ class CommentsSheet(
 
         composer = buildComposer()
         status = StatusView(context)
+
+        heading.visibility = View.GONE
+        filterButton.visibility = View.GONE
+        viewers.visibility = View.GONE
+
+        filterButton.isClickable = true
+        filterButton.setOnClickListener { switchChatFilter() }
+
+        banner.cornerRadius = dpf(10f)
+        banner.fillColor = Theme.surfaceAlt
+        banner.visibility = View.GONE
+
+        bannerText.visibility = View.GONE
 
         panel = Panel(context)
 
@@ -203,7 +242,14 @@ class CommentsSheet(
             )
         }
 
-        dialog.setOnDismissListener { Notify.offAll(this) }
+        dialog.setOnDismissListener {
+            Notify.offAll(this)
+
+            // Панель ушла — опрашивать чат больше некому и незачем.
+            clock.removeCallbacks(chatTick)
+
+            chatToken = null
+        }
 
         Notify.on(Notify.THEME, this) { repaint() }
     }
@@ -268,6 +314,11 @@ class CommentsSheet(
             isFocusableInTouchMode = true
 
             addView(gripHost)
+            addView(heading)
+            addView(filterButton)
+            addView(viewers)
+            addView(banner)
+            addView(bannerText)
             addView(list)
             addView(composer)
             addView(status)
@@ -348,14 +399,306 @@ class CommentsSheet(
                 )
             }
 
-            val listTop = top + dp(SHEET_HANDLE)
+            var listTop = top + dp(SHEET_HANDLE)
 
-            val listHeight = panelHeight - dp(SHEET_HANDLE) - composerHeight -
+            var listHeight = panelHeight - dp(SHEET_HANDLE) - composerHeight -
                 (if (composerHeight > 0) 0 else dp(SHEET_CONTENT_BOTTOM))
 
-            list.frame(contentLeft, listTop, contentWidth, listHeight)
-            status.frame(contentLeft, listTop, contentWidth, listHeight)
+            /**
+             * Шапка в две строки: сверху «Чат», под ним фильтр и счётчик.
+             * Числа те же, что в `layoutSubviews` iOS-версии.
+             */
+            if (heading.visibility == View.VISIBLE) {
+                val titleHeight = Metrics.lineHeight(Fonts.bold, 17f)
+                val subHeight = Metrics.lineHeight(Fonts.regular, 13f)
+
+                val tall = titleHeight + dp(2f) + subHeight
+
+                heading.frame(contentLeft, listTop, contentWidth, titleHeight)
+
+                val subTop = listTop + titleHeight + dp(2f)
+
+                var filterWidth = 0
+
+                if (filterButton.visibility == View.VISIBLE) {
+                    filterWidth = minOf(
+                        (contentWidth * 0.7f).toInt(),
+                        Metrics.textWidth(
+                            filterButton.text.toString(), Fonts.regular, 13f
+                        ) + dp(2f)
+                    )
+
+                    filterButton.frame(contentLeft, subTop, filterWidth, subHeight)
+                }
+
+                if (viewers.visibility == View.VISIBLE) {
+                    val at = contentLeft + filterWidth + (if (filterWidth > 0) dp(10f) else 0)
+
+                    viewers.frame(
+                        at, subTop, maxOf(0, contentWidth - (at - contentLeft)), subHeight
+                    )
+                }
+
+                listTop += tall + dp(10f)
+                listHeight -= tall + dp(10f)
+            }
+
+            if (banner.visibility == View.VISIBLE) {
+                val inner = contentWidth - dp(20f)
+
+                val textHeight = Metrics.textHeight(
+                    bannerText.text.toString(), Fonts.regular, 13f, inner, 2
+                )
+
+                val tall = textHeight + dp(16f)
+
+                banner.frame(contentLeft, listTop, contentWidth, tall)
+
+                bannerText.frame(
+                    contentLeft + dp(10f), listTop + dp(8f), inner, textHeight
+                )
+
+                listTop += tall + dp(8f)
+                listHeight -= tall + dp(8f)
+            }
+
+            list.frame(contentLeft, listTop, contentWidth, maxOf(0, listHeight))
+            status.frame(contentLeft, listTop, contentWidth, maxOf(0, listHeight))
         }
+    }
+
+    /**
+     * Открывает панель разговором трансляции вместо комментариев.
+     *
+     * Набранное карточкой отдаётся сюда: пока человек смотрел, она уже
+     * собрала последние полсотни сообщений, и начинать разговор с пустого
+     * места незачем.
+     */
+    fun showLiveChat(
+        token: String,
+        seen: List<ChatItem>,
+        filters: List<ChatFilter>?,
+        viewersText: String?
+    ) {
+        chatToken = token
+
+        // Писать в чат пока не умеем — строку ввода прячем.
+        composer.visibility = View.GONE
+
+        heading.visibility = View.VISIBLE
+        heading.text = loc("Чат")
+
+        /**
+         * Счётчик идёт через точку после фильтра — «Все сообщения · 1,9 тыс.».
+         * Само число даёт описание ролика: у эфира там смотрящие сейчас.
+         */
+        viewers.text = if (viewersText.isNullOrEmpty()) "" else "· $viewersText"
+        viewers.visibility = if (viewersText.isNullOrEmpty()) View.GONE else View.VISIBLE
+
+        /**
+         * Фильтры: «интересные сообщения» и «все сообщения».
+         *
+         * Порядок у подменю всегда один — сперва «интересные», потом «все», —
+         * и по умолчанию сервер даёт первый. Нам нужен второй: человек просил
+         * видеть все сообщения, а не отобранные. Поэтому и метку берём вторую,
+         * а не ту, что пришла с описанием ролика.
+         */
+        chatFilters = filters
+        chatFilter = if (filters != null && filters.size > 1) 1 else 0
+
+        filters?.getOrNull(chatFilter)?.token?.takeIf { it.isNotEmpty() }?.let {
+            chatToken = it
+        }
+
+        showChatFilterTitle()
+
+        items.clear()
+
+        for (said in seen) {
+            items.add(asComment(said))
+        }
+
+        adapter.notifyDataSetChanged()
+
+        if (items.isEmpty()) {
+            status.showBusy()
+        } else {
+            status.hide()
+
+            scrollChatToEnd()
+        }
+
+        show()
+
+        pollChat()
+    }
+
+    /** Сообщение чата в той же строке, что и комментарий. */
+    private fun asComment(said: ChatItem): CommentItem {
+        val item = CommentItem()
+
+        item.isChat = true
+        item.author = said.author
+        item.text = said.text
+        item.avatar = said.avatar
+
+        return item
+    }
+
+    /**
+     * Берёт очередную страницу чата и дописывает её снизу.
+     *
+     * Прокрутку двигаем вниз только если человек и так стоял внизу:
+     * иначе он читает старое, а список уезжает у него из-под пальца.
+     */
+    private fun pollChat() {
+        val token = chatToken
+
+        if (token.isNullOrEmpty()) {
+            return
+        }
+
+        async {
+            val page = Api.liveChat(token)
+
+            main { applyChat(page, token) }
+        }
+    }
+
+    private fun applyChat(
+        page: ru.computershik.troubadour.net.ChatPage?,
+        asked: String
+    ) {
+        if (asked != chatToken) {
+            return
+        }
+
+        var wait = 10_000L
+
+        if (page != null) {
+            page.continuation?.takeIf { it.isNotEmpty() }?.let { chatToken = it }
+
+            wait = page.waitMillis
+
+            page.banner?.let { pinned ->
+                bannerText.text = if (pinned.author.isEmpty()) {
+                    pinned.text
+                } else {
+                    "${pinned.author}: ${pinned.text}"
+                }
+
+                banner.visibility = View.VISIBLE
+                bannerText.visibility = View.VISIBLE
+
+                panel.requestLayout()
+            }
+
+            if (page.items.isNotEmpty()) {
+                val atEnd = chatIsAtEnd()
+
+                for (said in page.items) {
+                    items.add(asComment(said))
+                }
+
+                // Держим три сотни записей: старое всё равно уже прочитано.
+                while (items.size > 300) {
+                    items.removeAt(0)
+                }
+
+                status.hide()
+
+                adapter.notifyDataSetChanged()
+
+                if (atEnd) {
+                    scrollChatToEnd()
+                }
+            }
+        }
+
+        if (items.isEmpty()) {
+            status.showMessage(loc("В чате пока тихо"))
+        }
+
+        clock.removeCallbacks(chatTick)
+        clock.postDelayed(chatTick, maxOf(2000L, wait))
+    }
+
+    /** Стоит ли список у самого низа — тогда его можно двигать за лентой. */
+    private fun chatIsAtEnd(): Boolean {
+        if (items.isEmpty()) {
+            return true
+        }
+
+        return list.lastVisiblePosition >= items.size - 2
+    }
+
+    private fun scrollChatToEnd() {
+        list.post { list.setSelection(maxOf(0, items.size - 1)) }
+    }
+
+    /**
+     * Пишет на кнопке название нынешнего фильтра.
+     *
+     * Названия свои, а не серверные: второй фильтр сервер зовёт просто
+     * «Чат», что рядом с заголовком «Чат» ничего не объясняет.
+     */
+    private fun showChatFilterTitle() {
+        val filters = chatFilters
+
+        if (filters == null || filters.size < 2) {
+            filterButton.visibility = View.GONE
+
+            return
+        }
+
+        filterButton.visibility = View.VISIBLE
+
+        filterButton.text = if (chatFilter == 0) {
+            loc("Интересные сообщения")
+        } else {
+            loc("Все сообщения")
+        }
+
+        panel.requestLayout()
+    }
+
+    /**
+     * Переключает фильтр и начинает разговор заново.
+     *
+     * Набранное выбрасываем: у другого фильтра своя лента, и дописывать
+     * её снизу к чужой значило бы смешать два разных разговора.
+     */
+    private fun switchChatFilter() {
+        val filters = chatFilters
+
+        if (filters == null || filters.size < 2) {
+            return
+        }
+
+        chatFilter = (chatFilter + 1) % filters.size
+
+        val token = filters[chatFilter].token
+
+        if (token.isEmpty()) {
+            return
+        }
+
+        clock.removeCallbacks(chatTick)
+
+        chatToken = token
+
+        items.clear()
+
+        adapter.notifyDataSetChanged()
+
+        banner.visibility = View.GONE
+        bannerText.visibility = View.GONE
+
+        showChatFilterTitle()
+
+        status.showBusy()
+
+        pollChat()
     }
 
     private fun buildComposer(): View {
@@ -666,7 +1009,19 @@ class CommentsSheet(
         }
     }
 
+    private fun repaintChat() {
+        heading.setTextColor(Theme.primaryText)
+        filterButton.setTextColor(Theme.secondaryText)
+        viewers.setTextColor(Theme.mutedText)
+
+        banner.fillColor = Theme.surfaceAlt
+
+        bannerText.setTextColor(Theme.primaryText)
+    }
+
     private fun repaint() {
+        repaintChat()
+
         field.setTextColor(Theme.primaryText)
         field.setHintTextColor(Theme.mutedText)
 
@@ -684,6 +1039,12 @@ class CommentsSheet(
  * с отступом 10, автор 12 Medium secondary, время 12 muted, текст 13.
  */
 private class CommentRow(context: Context) : FrameLayout(context) {
+
+    companion object {
+
+        /** Два пробела между именем и текстом — как в `chatLine:` оригинала. */
+        private const val CHAT_GAP = "  "
+    }
 
     private val avatar = RoundedImage(context)
 
@@ -790,6 +1151,31 @@ private class CommentRow(context: Context) : FrameLayout(context) {
     }
 
     fun bind(item: CommentItem, screen: CommentsSheet) {
+        /**
+         * Чат: кружок тот же, а имя и текст идут одной лентой — как
+         * в оригинале и в iOS-версии. Ни времени, ни ответов, ни правки
+         * у сообщения чата нет.
+         */
+        if (item.isChat) {
+            bindChat(item)
+
+            return
+        }
+
+        published.visibility = VISIBLE
+        author.visibility = VISIBLE
+
+        /**
+         * Строки возвращаем без счёта, а не нулём.
+         *
+         * `maxLines = 0` у `TextView` означает «не рисовать вовсе», а не
+         * «сколько угодно»: строка после чата осталась бы пустой. Вид
+         * переиспользуется списком, и восстанавливать надо то, что
+         * поменял чат, — и предел строк, и обрез многоточием.
+         */
+        text.maxLines = Integer.MAX_VALUE
+        text.ellipsize = null
+
         /** Отступ ответа — `YTReplyIndent` из iOS-версии. */
         row.setPadding(
             dp(12f) + (if (item.isReply) dp(30f) else 0),
@@ -828,5 +1214,47 @@ private class CommentRow(context: Context) : FrameLayout(context) {
         edit.setOnClickListener { screen.beginEdit(item) }
 
         setOnClickListener { screen.beginReply(item) }
+    }
+
+    /**
+     * Строка чата: имя приглушённым цветом, за ним текст обычным,
+     * всё одной лентой до восьми строк.
+     *
+     * Отдельного вида ради этого не заводим: поля те же, разница
+     * в том, что показано, — так же и в iOS-версии.
+     */
+    private fun bindChat(item: CommentItem) {
+        row.setPadding(dp(12f), dp(6f), dp(12f), dp(6f))
+
+        author.visibility = GONE
+        published.visibility = GONE
+        replies.visibility = GONE
+        edit.visibility = GONE
+
+        avatar.placeholderColor = Theme.avatarPlaceholder
+
+        val whole = item.author + CHAT_GAP + item.text
+
+        val line = android.text.SpannableString(whole)
+
+        line.setSpan(
+            android.text.style.ForegroundColorSpan(Theme.secondaryText),
+            0, item.author.length,
+            android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+
+        text.setTextColor(Theme.primaryText)
+        text.maxLines = 8
+        text.ellipsize = android.text.TextUtils.TruncateAt.END
+        text.text = line
+
+        ImageLoader.loadInto(avatar, item.avatar, 24f)
+
+        replies.setOnClickListener(null)
+        edit.setOnClickListener(null)
+
+        setOnClickListener(null)
+
+        isClickable = false
     }
 }

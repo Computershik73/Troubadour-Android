@@ -21,6 +21,15 @@ class VideoDetails {
     var commentsToken: String? = null
     var commentsCount: String? = null
 
+    /**
+     * Метка чата трансляции — отдельно от панели комментариев.
+     *
+     * Именно отдельно: у эфира комментариев может не быть вовсе, и внутри
+     * обхода панелей эта метка просто не нашлась бы. Живёт она в своём
+     * месте, `conversationBar`, и от комментариев не зависит.
+     */
+    var liveChatToken: String? = null
+
     var related: List<VideoItem> = emptyList()
 
     /** Очередь подборки — плейлиста или микса, открытого вместе с роликом. */
@@ -46,6 +55,15 @@ class CommentItem {
     var text: String = ""
     var published: String? = null
     var avatar: String? = null
+
+    /**
+     * Сообщение чата, а не комментарий.
+     *
+     * Своего списка чату не заводим: строка та же, разница в раскладке —
+     * кружок поменьше, имя и текст одной лентой, ни времени, ни ответов.
+     * Так же и в iOS-версии, где у записи стоит метка `YTChatKey`.
+     */
+    var isChat: Boolean = false
 
     /** Метка продолжения ветки ответов и их число. */
     var replies: String? = null
@@ -113,6 +131,26 @@ internal fun Api.postNext(body: JSONObject): JSONObject? =
     post("next", body, "WEB", false, 0.0)
 
 fun Api.videoDetails(videoId: String): VideoDetails? = videoDetails(videoId, null)
+
+/**
+ * Метка первой страницы чата, если он у ролика есть.
+ *
+ * Бюджет обхода большой нарочно: `conversationBar` лежит глубоко
+ * и далеко не первым — у скупого счёта его просто не находится.
+ */
+private fun liveChatTokenIn(json: Any?): String? {
+    val chat = Json.findFirst("liveChatRenderer", json, 200000) ?: return null
+
+    for (step in Json.findAll("reloadContinuationData", chat, 4000)) {
+        val token = Json.text(step, "continuation")
+
+        if (!token.isNullOrEmpty()) {
+            return token
+        }
+    }
+
+    return null
+}
 
 /**
  * То же, но с подборкой: заполняются [VideoDetails.queue] и соседние поля.
@@ -252,6 +290,17 @@ fun Api.videoDetails(videoId: String, playlistId: String?): VideoDetails? {
             result.queueIndex = Json.int(queue, "currentIndex")
         }
     }
+
+    /**
+     * Чат трансляции приходит тем же ответом `next`, которым берётся
+     * описание, — второго захода не нужно. Путь у него свой:
+     * `contents.twoColumnWatchNextResults.conversationBar.liveChatRenderer`,
+     * внутри `continuations[0].reloadContinuationData.continuation`.
+     *
+     * У записи такой панели нет вовсе, и это надёжный признак: чат бывает
+     * только у трансляции и у её записи, пока чат не убрали.
+     */
+    result.liveChatToken = liveChatTokenIn(json)
 
     /**
      * Токен комментариев лежит в панели с идентификатором

@@ -4,6 +4,7 @@ import android.content.Context
 import android.view.Gravity
 import android.view.ViewGroup
 import ru.computershik.troubadour.loc
+import ru.computershik.troubadour.net.ChatItem
 import ru.computershik.troubadour.net.CommentItem
 import ru.computershik.troubadour.ui.Metrics.dp
 
@@ -81,6 +82,44 @@ class CommentsCard(context: Context) : ViewGroup(context) {
         time.visibility = GONE
 
         text.text = said
+
+        requestLayout()
+    }
+
+    /**
+     * Заголовок карточки: «Комментарии» у записи, «Чат» у трансляции.
+     *
+     * Своей карточки чату не заводим намеренно: эта уже умеет автора,
+     * кружок и текст, а разница только в заголовке и в том, что время
+     * у сообщения чата смысла не имеет.
+     */
+    fun setTitle(said: String) {
+        title.text = said
+
+        requestLayout()
+    }
+
+    /**
+     * Сообщение чата — в той же карточке, что и комментарий.
+     *
+     * Справа пусто: заголовок и так говорит «Чат», а время у записи
+     * чата ни о чём не сообщает — она сиюминутная.
+     */
+    fun bindChat(item: ChatItem) {
+        notice = null
+
+        visibility = VISIBLE
+
+        avatar.visibility = VISIBLE
+        author.visibility = VISIBLE
+        time.visibility = VISIBLE
+
+        author.text = item.author
+        time.text = ""
+
+        text.text = Metrics.clampText(item.text, 300)
+
+        ImageLoader.loadInto(avatar, item.avatar, 24f)
 
         requestLayout()
     }

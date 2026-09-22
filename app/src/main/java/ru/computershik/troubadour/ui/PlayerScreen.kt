@@ -27,6 +27,8 @@ import ru.computershik.troubadour.net.Downloads
 import ru.computershik.troubadour.net.Notifications
 import ru.computershik.troubadour.net.VideoDetails
 import ru.computershik.troubadour.net.comments
+import ru.computershik.troubadour.net.liveChat
+import ru.computershik.troubadour.net.liveChatFilters
 import ru.computershik.troubadour.net.rate
 import ru.computershik.troubadour.net.setNotifications
 import ru.computershik.troubadour.net.setSubscribed
@@ -191,6 +193,19 @@ class PlayerScreen(
     private var broadcastSaid: String? = null
     private var broadcastTriedAt = 0.0
     private var broadcastWaiting = false
+
+    /**
+     * Чат трансляции: метка следующей страницы и последние записи.
+     *
+     * Записи копятся здесь, а не в панели: пока человек смотрит, карточка
+     * уже собрала последние полсотни, и открывать разговор с пустого
+     * места незачем.
+     */
+    private var chatToken: String? = null
+    private var chatItems = ArrayList<ru.computershik.troubadour.net.ChatItem>()
+    private var chatFilters: List<ru.computershik.troubadour.net.ChatFilter>? = null
+
+    private val chatTick = Runnable { pollLiveChat() }
 
     private val broadcastTick = object : Runnable {
 
@@ -1465,7 +1480,7 @@ class PlayerScreen(
             videoId
         )
 
-        loadFirstComment(page.commentsToken)
+        applyConversation(page)
 
         chaptersCard.bind(chapters)
 
@@ -1925,11 +1940,166 @@ class PlayerScreen(
         }
     }
 
+    /**
+     * Что стоит под роликом — комментарии или чат трансляции.
+     *
+     * У эфира комментариев обычно нет вовсе, и там прежде висела надпись
+     * «Комментарии к этому видео отключены»: место пустовало, хотя живой
+     * разговор шёл рядом. Метка чата приходит тем же ответом, что и всё
+     * описание, так что лишнего запроса не нужно.
+     */
+    private fun applyConversation(page: ru.computershik.troubadour.net.VideoDetails) {
+        stopLiveChat()
+
+        chatFilters = null
+
+        // Обычный ролик — заголовок прежний; ниже его сменит чат, если он есть.
+        commentsCard.setTitle(loc("Комментарии"))
+
+        chatToken = page.liveChatToken
+
+        if (!chatToken.isNullOrEmpty()) {
+            chatItems = ArrayList()
+
+            /**
+             * Метки фильтров добываем сразу, пока человек смотрит: за ними
+             * идёт отдельный заход на страницу чата, и делать его в тот миг,
+             * когда панель открывают, значит заставить ждать.
+             */
+            val forVideo = videoId
+
+            async {
+                val filters = Api.liveChatFilters(forVideo)
+
+                main {
+                    if (forVideo == videoId) {
+                        chatFilters = filters
+                    }
+                }
+            }
+
+            // На месте комментариев теперь чат — и называется он так же.
+            commentsCard.setTitle(loc("Чат"))
+
+            commentsCard.showNotice(loc("Чат трансляции загружается…"))
+
+            pollLiveChat()
+
+            /**
+             * Комментарии при живом чате не спрашиваем вовсе.
+             *
+             * Карточка одна, и класть в неё то и другое разом значит
+             * получить мигание: чат обновляется каждые десять секунд
+             * и затирал бы комментарий, а тот — свежее сообщение.
+             * У трансляции разговор идёт в чате, и карточка его.
+             */
+            return
+        }
+
+        loadFirstComment(page.commentsToken)
+    }
+
+    // --- Чат трансляции ----------------------------------------------------
+
+    /**
+     * Останавливает опрос и забывает набранное.
+     *
+     * Зовётся на каждой загрузке страницы и при уходе с неё: таймер,
+     * забытый от прошлого ролика, стучался бы в чужой чат и переписывал
+     * карточку поверх нового ролика.
+     */
+    private fun stopLiveChat() {
+        clock.removeCallbacks(chatTick)
+
+        chatToken = null
+        chatItems = ArrayList()
+    }
+
+    /**
+     * Берёт очередную страницу чата и показывает свежее сообщение.
+     *
+     * Опрос идёт с той задержкой, которую называет сам сервер (обычно
+     * десять секунд): чаще он всё равно ничего не отдаст. Метка каждый
+     * раз новая, старая после ответа не годится.
+     */
+    private fun pollLiveChat() {
+        val token = chatToken
+
+        if (token.isNullOrEmpty()) {
+            return
+        }
+
+        async {
+            val page = Api.liveChat(token)
+
+            main { applyLiveChat(page, token) }
+        }
+    }
+
+    private fun applyLiveChat(
+        page: ru.computershik.troubadour.net.ChatPage?,
+        asked: String
+    ) {
+        // Пока ходили в сеть, страница могла смениться — ответ уже не наш.
+        if (asked != chatToken) {
+            return
+        }
+
+        if (page == null) {
+            /**
+             * Молчание сервера чат не кончает: у трансляции бывают
+             * и пустые ответы. Пробуем снова с той же меткой.
+             */
+            scheduleLiveChatAfter(10_000)
+
+            return
+        }
+
+        page.continuation?.takeIf { it.isNotEmpty() }?.let { chatToken = it }
+
+        if (page.items.isNotEmpty()) {
+            chatItems.addAll(page.items)
+
+            // Держим полсотни последних: панели этого хватает, памяти — тем более.
+            while (chatItems.size > 50) {
+                chatItems.removeAt(0)
+            }
+
+            chatItems.lastOrNull()?.let { commentsCard.bindChat(it) }
+        } else if (chatItems.isEmpty()) {
+            commentsCard.showNotice(loc("В чате пока тихо"))
+        }
+
+        scheduleLiveChatAfter(page.waitMillis)
+    }
+
+    private fun scheduleLiveChatAfter(millis: Long) {
+        clock.removeCallbacks(chatTick)
+
+        clock.postDelayed(chatTick, maxOf(2000L, millis))
+    }
+
     private fun openComments() {
         /**
          * Панелью поверх страницы, а не отдельной страницей: ролик
          * остаётся виден и играет, как в iOS-версии и в оригинале.
          */
+        /**
+         * У трансляции на этом месте чат, и открывается он же.
+         *
+         * Комментариев у эфира обычно нет вовсе, так что выбор простой:
+         * есть метка чата — показываем разговор, нет — прежние комментарии.
+         */
+        val chat = chatToken
+
+        if (!chat.isNullOrEmpty()) {
+            CommentsSheet(context, videoId, null).showLiveChat(
+                chat, chatItems, chatFilters, details?.views
+            )
+
+            return
+        }
+
         CommentsSheet(context, videoId, details?.commentsToken).show()
     }
 
@@ -2292,6 +2462,9 @@ class PlayerScreen(
 
         // Ожидание трансляции экран не переживает: ждать больше некому.
         stopBroadcastWait()
+
+        // И чат тоже: опрашивать его некому и некуда показывать.
+        stopLiveChat()
 
         /**
          * Флаг снимаем не наотмашь, а по делу.
