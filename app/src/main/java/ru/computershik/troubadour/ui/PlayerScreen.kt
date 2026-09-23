@@ -30,6 +30,7 @@ import ru.computershik.troubadour.net.comments
 import ru.computershik.troubadour.net.liveChat
 import ru.computershik.troubadour.net.liveChatFilters
 import ru.computershik.troubadour.net.Dislikes
+import android.widget.HorizontalScrollView
 import ru.computershik.troubadour.Counts
 import ru.computershik.troubadour.net.rate
 import ru.computershik.troubadour.net.setNotifications
@@ -98,6 +99,22 @@ class PlayerScreen(
 
     /** Число дизлайков — справа от значка, как счётчик у лайка. */
     private lateinit var dislikeLabel: TextView
+
+    /**
+     * «Поделиться» и «Сохранить» — полями, а не местными: их надо
+     * перекрашивать при смене темы. Прежде «Поделиться» заводилась
+     * местной и так и оставалась в цветах той темы, при которой
+     * страницу собрали.
+     */
+    private lateinit var shareIcon: ImageView
+    private lateinit var shareLabel: TextView
+
+    private lateinit var saveButton: View
+    private lateinit var saveIcon: ImageView
+    private lateinit var saveLabel: TextView
+
+    /** Лежит ли ролик хоть в одном плейлисте — по этому красится значок. */
+    private var savedSomewhere = false
 
     private lateinit var downloadIcon: ImageView
     private lateinit var downloadLabel: TextView
@@ -1138,14 +1155,14 @@ class PlayerScreen(
         shareRow.orientation = LinearLayout.HORIZONTAL
         shareRow.gravity = Gravity.CENTER_VERTICAL
 
-        val shareIcon = ImageView(context)
+        shareIcon = ImageView(context)
 
         shareIcon.setImageBitmap(Icons.icon("share"))
         shareIcon.scaleType = ImageView.ScaleType.FIT_CENTER
 
         shareRow.addView(shareIcon, LinearLayout.LayoutParams(dp(20f), dp(20f)))
 
-        val shareLabel = label(context, Fonts.regular, 14f, Theme.primaryText, 1)
+        shareLabel = label(context, Fonts.regular, 14f, Theme.primaryText, 1)
 
         shareLabel.text = loc("Поделиться")
 
@@ -1168,6 +1185,54 @@ class PlayerScreen(
                 ViewGroup.LayoutParams.WRAP_CONTENT
             )
         )
+
+        /**
+         * «Сохранить» — между «Поделиться» и «Скачать», как в оригинале.
+         *
+         * Видна только вошедшему: плейлисты бывают лишь у учётной записи,
+         * и безымянному кнопка предлагала бы то, чего сделать нельзя.
+         */
+        val save = TappableView(context)
+
+        save.setPadding(dp(16f), dp(8f), dp(16f), dp(8f))
+
+        val saveRow = LinearLayout(context)
+
+        saveRow.orientation = LinearLayout.HORIZONTAL
+        saveRow.gravity = Gravity.CENTER_VERTICAL
+
+        saveIcon = ImageView(context)
+        saveIcon.scaleType = ImageView.ScaleType.FIT_CENTER
+
+        saveRow.addView(saveIcon, LinearLayout.LayoutParams(dp(20f), dp(20f)))
+
+        saveLabel = label(context, Fonts.regular, 14f, Theme.primaryText, 1)
+
+        saveLabel.text = loc("Сохранить")
+
+        val saveParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        )
+
+        saveParams.leftMargin = dp(6f)
+
+        saveRow.addView(saveLabel, saveParams)
+
+        save.addView(saveRow)
+        save.onTap = { openSaveSheet() }
+
+        saveButton = save
+
+        row.addView(
+            save,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
+
+        applySaveButton()
 
         /**
          * «Скачать» — значок, а при загрузке ещё и проценты.
@@ -1212,11 +1277,64 @@ class PlayerScreen(
             )
         )
 
-        row.layoutParams = marginParams(dp(16f), dp(2f), dp(16f), dp(16f))
+        /**
+         * Ряд прокручивается вбок — так он устроен и в оригинале
+         * (`VideoActionsScrollViewer`).
+         *
+         * Прежде он стоял неподвижно в полях 16 и на узком экране
+         * `LinearLayout` молча ужимал последних детей: с «Сохранить»
+         * и процентами скачивания кнопки уезжали бы за край или
+         * обрезались. Поля теперь внутри прокрутки — ряд начинается
+         * с отступа 16, а уезжает до самого края экрана.
+         */
+        row.setPadding(dp(16f), 0, dp(16f), 0)
+
+        val scroller = HorizontalScrollView(context)
+
+        scroller.isHorizontalScrollBarEnabled = false
+        scroller.overScrollMode = View.OVER_SCROLL_NEVER
+
+        scroller.addView(
+            row,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
+
+        scroller.layoutParams = marginParams(0, dp(2f), 0, dp(16f))
 
         applyDownloadState()
 
-        return row
+        return scroller
+    }
+
+    /** Кнопка «Сохранить»: видна ли и каким значком. */
+    private fun applySaveButton() {
+        saveButton.visibility = if (Auth.isSignedIn()) View.VISIBLE else View.GONE
+
+        saveIcon.setImageBitmap(Icons.icon(if (savedSomewhere) "pl_save_on" else "pl_save"))
+
+        saveLabel.setTextColor(Theme.primaryText)
+    }
+
+    private fun openSaveSheet() {
+        if (!Auth.isSignedIn()) {
+            Toast.show(context, loc("Войдите в аккаунт"))
+
+            return
+        }
+
+        val forVideo = videoId
+
+        SavePlaylistSheet(context, forVideo) { saved ->
+            // Лист мог пережить переход к другому ролику — тогда отметка чужая.
+            if (forVideo == videoId) {
+                savedSomewhere = saved
+
+                applySaveButton()
+            }
+        }.show()
     }
 
     /**
@@ -1489,6 +1607,15 @@ class PlayerScreen(
         likeLabel.text = page.likes ?: ""
 
         loadDislikes()
+
+        /**
+         * Отметку «сохранено» сбрасываем: узнать её можно только списком
+         * плейлистов, а спрашивать его ради значка на каждом ролике —
+         * лишний запрос. Лист, когда его откроют, покрасит значок сам.
+         */
+        savedSomewhere = false
+
+        applySaveButton()
 
         liked = page.liked
         disliked = page.disliked
@@ -2566,6 +2693,11 @@ class PlayerScreen(
 
         applyRating()
         applySubscription()
+
+        shareIcon.setImageBitmap(Icons.icon("share"))
+        shareLabel.setTextColor(Theme.primaryText)
+
+        applySaveButton()
     }
 
     override fun handleBack(): Boolean {

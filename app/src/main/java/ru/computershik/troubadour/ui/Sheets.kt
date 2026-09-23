@@ -15,8 +15,12 @@ import android.widget.ScrollView
 import ru.computershik.troubadour.AudioLanguage
 import ru.computershik.troubadour.Settings
 import ru.computershik.troubadour.loc
+import ru.computershik.troubadour.locF
 import ru.computershik.troubadour.net.Account
 import ru.computershik.troubadour.net.Api
+import ru.computershik.troubadour.net.PlaylistSaveState
+import ru.computershik.troubadour.net.playlistSaveStates
+import ru.computershik.troubadour.net.setSavedToPlaylist
 import ru.computershik.troubadour.net.accountsList
 import ru.computershik.troubadour.net.activeAccountPage
 import ru.computershik.troubadour.net.setActiveAccountPage
@@ -918,6 +922,97 @@ class AudioMenu(context: Context) : Sheet(context, loc("Аудиодорожка
                     PlayerEngine.pickAudioTrack(track.id)
                 }
             )
+        }
+    }
+}
+
+/**
+ * «Сохранить» — порт `SaveBottomSheetPanel` из UWP-оригинала.
+ *
+ * Лист открывается сразу, со строкой «Загрузка…», и наполняется, когда
+ * придёт список: ждать сети до появления листа значило бы оставить
+ * нажатие без ответа на секунду и больше.
+ *
+ * Нажатие по плейлисту переключает его — кладёт ролик или убирает —
+ * и закрывает лист; итог сообщается всплывающей надписью, как
+ * в оригинале. [onChanged] получает, лежит ли ролик теперь хоть в одном
+ * плейлисте: по этому красится значок у кнопки.
+ */
+class SavePlaylistSheet(
+    context: Context,
+    private val videoId: String,
+    private val onChanged: (Boolean) -> Unit
+) : Sheet(context, loc("Выберите плейлист")) {
+
+    private var states: List<PlaylistSaveState> = emptyList()
+
+    init {
+        add(TextRow(context, dark, null, loc("Загрузка…")))
+
+        async {
+            val loaded = Api.playlistSaveStates(videoId)
+
+            main { fill(loaded) }
+        }
+    }
+
+    private fun fill(loaded: List<PlaylistSaveState>?) {
+        clearRows()
+
+        if (loaded == null) {
+            add(TextRow(context, dark, null, loc("Не получилось")))
+
+            return
+        }
+
+        states = loaded
+
+        onChanged(loaded.any { it.contains })
+
+        if (loaded.isEmpty()) {
+            add(TextRow(context, dark, null, loc("Нет данных")))
+
+            return
+        }
+
+        for (state in loaded) {
+            add(row(state.title, null, state.contains) { toggle(state) })
+        }
+    }
+
+    private fun toggle(state: PlaylistSaveState) {
+        val save = !state.contains
+
+        /**
+         * Лист к приходу ответа уже закрыт — `row` закрывает его сам,
+         * как в оригинале. Надпись показываем через тот же `Context`
+         * страницы: он жив и после листа.
+         */
+        val host = context
+
+        async {
+            val done = Api.setSavedToPlaylist(state.playlistId, videoId, save)
+
+            main {
+                if (!done) {
+                    Toast.show(host, loc("Не получилось"))
+
+                    return@main
+                }
+
+                state.contains = save
+
+                onChanged(states.any { it.contains })
+
+                Toast.show(
+                    host,
+                    if (save) {
+                        locF("Видео добавлено в плейлист «%@»", state.title)
+                    } else {
+                        locF("Видео удалено из плейлиста «%@»", state.title)
+                    }
+                )
+            }
         }
     }
 }
