@@ -37,6 +37,7 @@ class ShortsPlayback {
     var comments: String? = null
     var commentsToken: String? = null
     var liked: Boolean = false
+    var disliked: Boolean = false
     var subscribed: Boolean = false
 
     /** Упёрлись в проверку «вы не робот» — страница покажет причину. */
@@ -624,6 +625,7 @@ fun Api.shortsPlayback(videoId: String): ShortsPlayback? {
         state.commentsToken?.let { result.commentsToken = it }
 
         result.liked = state.liked
+        result.disliked = state.disliked
         result.subscribed = state.subscribed
     }
 

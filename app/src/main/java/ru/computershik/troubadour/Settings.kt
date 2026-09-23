@@ -90,6 +90,7 @@ object Settings {
     private const val HIDE_SHORTS = "YTHideShorts"
     private const val SEEK_PREVIEW = "YTSeekPreview"
     private const val SPONSOR_BLOCK = "YTSponsorBlock"
+    private const val DISLIKES = "YTDislikes"
     private const val SEARCH_HISTORY = "YTSearchHistory"
 
     private val store: SharedPreferences
@@ -501,6 +502,16 @@ object Settings {
     var usesSponsorBlock: Boolean
         get() = flag(SPONSOR_BLOCK, false)
         set(value) = setFlag(SPONSOR_BLOCK, value)
+
+    /**
+     * Показывать число дизлайков по Return YouTube Dislike.
+     *
+     * Включено сразу: ради этого числа настройку и завели. Выключают её
+     * те, кто не хочет отдавать номера роликов стороннему сервису.
+     */
+    var showsDislikes: Boolean
+        get() = flag(DISLIKES, true)
+        set(value) = setFlag(DISLIKES, value)
 
     /**
      * Брать ли шестидесятикадровые дорожки.

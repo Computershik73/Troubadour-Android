@@ -29,6 +29,8 @@ import ru.computershik.troubadour.net.VideoDetails
 import ru.computershik.troubadour.net.comments
 import ru.computershik.troubadour.net.liveChat
 import ru.computershik.troubadour.net.liveChatFilters
+import ru.computershik.troubadour.net.Dislikes
+import ru.computershik.troubadour.Counts
 import ru.computershik.troubadour.net.rate
 import ru.computershik.troubadour.net.setNotifications
 import ru.computershik.troubadour.net.setSubscribed
@@ -93,6 +95,9 @@ class PlayerScreen(
     private lateinit var likeLabel: TextView
     private lateinit var likeIcon: ImageView
     private lateinit var dislikeIcon: ImageView
+
+    /** Число дизлайков — справа от значка, как счётчик у лайка. */
+    private lateinit var dislikeLabel: TextView
 
     private lateinit var downloadIcon: ImageView
     private lateinit var downloadLabel: TextView
@@ -1071,9 +1076,38 @@ class PlayerScreen(
         dislikeIcon = ImageView(context)
         dislikeIcon.scaleType = ImageView.ScaleType.FIT_CENTER
 
+        /**
+         * Значок и число — рядом, с тем же отступом 6, что у лайка.
+         *
+         * Число прячется, пока его нет: пустая подпись оставила бы после
+         * значка лишние шесть точек, и подложка оценки вышла бы кривой.
+         */
+        val dislikeRow = LinearLayout(context)
+
+        dislikeRow.orientation = LinearLayout.HORIZONTAL
+        dislikeRow.gravity = Gravity.CENTER_VERTICAL
+
+        dislikeRow.addView(dislikeIcon, LinearLayout.LayoutParams(dp(20f), dp(20f)))
+
+        dislikeLabel = label(context, Fonts.regular, 14f, Theme.primaryText, 1)
+        dislikeLabel.visibility = View.GONE
+
+        val dislikeCountParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        )
+
+        dislikeCountParams.leftMargin = dp(6f)
+
+        dislikeRow.addView(dislikeLabel, dislikeCountParams)
+
         dislike.addView(
-            dislikeIcon,
-            FrameLayout.LayoutParams(dp(20f), dp(20f), Gravity.CENTER)
+            dislikeRow,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER
+            )
         )
 
         dislike.onTap = { rate("dislike") }
@@ -1454,6 +1488,8 @@ class PlayerScreen(
 
         likeLabel.text = page.likes ?: ""
 
+        loadDislikes()
+
         liked = page.liked
         disliked = page.disliked
         subscribed = page.subscribed
@@ -1778,6 +1814,37 @@ class PlayerScreen(
         }
     }
 
+    /**
+     * Число дизлайков — отдельным запросом, после страницы.
+     *
+     * Ждать его перед показом незачем: оно стороннее и не главное,
+     * а сервис бывает и медленным. Пришло — дописываем; ролик за это
+     * время сменился — выбрасываем.
+     */
+    private fun loadDislikes() {
+        dislikeLabel.text = ""
+        dislikeLabel.visibility = View.GONE
+
+        if (!Settings.showsDislikes) {
+            return
+        }
+
+        val forVideo = videoId
+
+        async {
+            val count = Dislikes.count(forVideo)
+
+            main {
+                if (forVideo != videoId || count == null) {
+                    return@main
+                }
+
+                dislikeLabel.text = Counts.compact(count)
+                dislikeLabel.visibility = View.VISIBLE
+            }
+        }
+    }
+
     private fun applyRating() {
         likeIcon.setImageBitmap(Icons.icon(if (liked) "pl_like_on" else "pl_like"))
         dislikeIcon.setImageBitmap(
@@ -1785,6 +1852,7 @@ class PlayerScreen(
         )
 
         likeLabel.setTextColor(Theme.primaryText)
+        dislikeLabel.setTextColor(Theme.primaryText)
     }
 
     private fun toggleSubscription() {

@@ -11,11 +11,13 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import ru.computershik.troubadour.Log
 import ru.computershik.troubadour.Notify
+import ru.computershik.troubadour.Counts
 import ru.computershik.troubadour.Settings
 import ru.computershik.troubadour.loc
 import ru.computershik.troubadour.model.VideoItem
 import ru.computershik.troubadour.net.Api
 import ru.computershik.troubadour.net.Auth
+import ru.computershik.troubadour.net.Dislikes
 import ru.computershik.troubadour.net.ShortsPlayback
 import ru.computershik.troubadour.net.rate
 import ru.computershik.troubadour.net.setSubscribed
@@ -56,7 +58,9 @@ class ShortsView(context: Context) : FrameLayout(context) {
     private val shortAvatar = RoundedImage(context)
 
     private val likeIcon = ImageView(context)
+    private val dislikeIcon = ImageView(context)
     private val likeCount = label(context, Fonts.semiBold, 12f, android.graphics.Color.WHITE, 1)
+    private val dislikeCount = label(context, Fonts.semiBold, 12f, android.graphics.Color.WHITE, 1)
     private val commentCount = label(context, Fonts.semiBold, 12f, android.graphics.Color.WHITE, 1)
 
     private val ring = LoadingRing(context)
@@ -225,6 +229,7 @@ class ShortsView(context: Context) : FrameLayout(context) {
 
     private var playback: ShortsPlayback? = null
     private var liked = false
+    private var disliked = false
 
     /** С какого ролика начинать — если листалку открыли из выдачи. */
     var seed: VideoItem? = null
@@ -418,7 +423,14 @@ class ShortsView(context: Context) : FrameLayout(context) {
         column.orientation = LinearLayout.VERTICAL
         column.gravity = Gravity.CENTER_HORIZONTAL
 
-        column.addView(button(likeIcon, likeCount, "pl_like") { rate() })
+        column.addView(button(likeIcon, likeCount, "pl_like") { rate("like") })
+
+        /**
+         * Дизлайк — вторым, как в iOS-версии и в оригинале: лайк, дизлайк,
+         * комментарии, «Поделиться». Здесь его не было вовсе, и поставить
+         * дизлайк у Shorts можно было только открыв ролик страницей.
+         */
+        column.addView(button(dislikeIcon, dislikeCount, "pl_dislike") { rate("dislike") })
 
         val comments = ImageView(context)
 
@@ -613,6 +625,8 @@ class ShortsView(context: Context) : FrameLayout(context) {
         likeCount.text = ""
         commentCount.text = ""
 
+        showDislikes(null)
+
         /**
          * Прежнее превью стираем, а не ждём, пока его затрёт новое.
          *
@@ -664,6 +678,7 @@ class ShortsView(context: Context) : FrameLayout(context) {
 
                 playback = ready
                 liked = ready.liked
+                disliked = ready.disliked
 
                 ready.title?.let { titleLabel.text = it }
                 ready.channelTitle?.let { authorLabel.text = it }
@@ -672,6 +687,8 @@ class ShortsView(context: Context) : FrameLayout(context) {
 
                 likeCount.text = ready.likes ?: ""
                 commentCount.text = ready.comments ?: ""
+
+                loadDislikes(videoId, index)
 
                 applyRating()
 
@@ -952,7 +969,13 @@ class ShortsView(context: Context) : FrameLayout(context) {
 
     // --- Действия ---------------------------------------------------------
 
-    private fun rate() {
+    /**
+     * Оценка: `like` или `dislike`; нажатие по уже поставленной снимает её.
+     *
+     * Лайк и дизлайк взаимно исключают друг друга, как у самого YouTube
+     * и на странице ролика: поставив одно, снимаем другое.
+     */
+    private fun rate(want: String) {
         if (!Auth.isSignedIn()) {
             Toast.show(context, loc("Войдите в аккаунт"))
 
@@ -961,18 +984,30 @@ class ShortsView(context: Context) : FrameLayout(context) {
 
         val videoId = items.getOrNull(at)?.videoId ?: return
 
-        val want = if (liked) "none" else "like"
+        val action = when {
+            want == "like" && liked -> "none"
+            want == "dislike" && disliked -> "none"
+            else -> want
+        }
 
-        liked = !liked
+        // Показываем сразу, не дожидаясь ответа: отказ вернёт как было.
+        val wasLiked = liked
+        val wasDisliked = disliked
+
+        liked = action == "like"
+        disliked = action == "dislike"
 
         applyRating()
 
         async {
-            if (!Api.rate(videoId, want, null)) {
+            if (!Api.rate(videoId, action, null)) {
                 main {
-                    liked = !liked
+                    liked = wasLiked
+                    disliked = wasDisliked
 
                     applyRating()
+
+                    Toast.show(context, loc("Не получилось"))
                 }
             }
         }
@@ -980,6 +1015,44 @@ class ShortsView(context: Context) : FrameLayout(context) {
 
     private fun applyRating() {
         likeIcon.setImageBitmap(Icons.darkIcon(if (liked) "pl_like_on" else "pl_like"))
+        dislikeIcon.setImageBitmap(
+            Icons.darkIcon(if (disliked) "pl_dislike_on" else "pl_dislike")
+        )
+    }
+
+    /**
+     * Число дизлайков под значком — или ничего.
+     *
+     * Пустая подпись всё равно занимает строку, и значок стоял бы
+     * не по центру своей ячейки, а выше, над пустотой.
+     */
+    private fun showDislikes(count: Long?) {
+        if (count == null) {
+            dislikeCount.text = ""
+            dislikeCount.visibility = View.GONE
+        } else {
+            dislikeCount.text = Counts.compact(count)
+            dislikeCount.visibility = View.VISIBLE
+        }
+    }
+
+    private fun loadDislikes(videoId: String, index: Int) {
+        if (!Settings.showsDislikes) {
+            return
+        }
+
+        async {
+            val count = Dislikes.count(videoId)
+
+            main {
+                // Пролистнули дальше — число уже чужое.
+                if (at != index || items.getOrNull(at)?.videoId != videoId) {
+                    return@main
+                }
+
+                showDislikes(count)
+            }
+        }
     }
 
     private fun openComments() {

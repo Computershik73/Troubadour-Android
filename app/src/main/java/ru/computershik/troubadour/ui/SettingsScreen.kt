@@ -177,6 +177,14 @@ class SettingsScreen(context: Context) : Screen(context) {
             Settings.usesSponsorBlock = it
         }
 
+        toggle(
+            loc("Показывать дизлайки"),
+            Settings.showsDislikes,
+            loc("Число даёт Return YouTube Dislike: сам YouTube его больше не показывает")
+        ) {
+            Settings.showsDislikes = it
+        }
+
         /**
          * Шестьдесят кадров — с предупреждением там, где железо их не тянет.
          *
