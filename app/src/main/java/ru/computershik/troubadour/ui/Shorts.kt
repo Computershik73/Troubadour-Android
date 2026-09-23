@@ -460,7 +460,22 @@ class ShortsView(context: Context) : FrameLayout(context) {
         if (count != null) {
             count.gravity = Gravity.CENTER
 
-            column.addView(count)
+            /**
+             * Ширина подписи — по тексту, и это обязательно указывать.
+             *
+             * Без параметров вертикальный `LinearLayout` даёт ребёнку
+             * `MATCH_PARENT`, а такой ребёнок в ширину колонки не идёт:
+             * колонка брала её от значка, тридцать две точки, и уже по ней
+             * растягивала подпись. «4,4 тыс.» в тридцать две точки не
+             * влезает — отсюда многоточие под лайком и комментариями.
+             */
+            column.addView(
+                count,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+            )
         }
 
         holder.addView(column)
