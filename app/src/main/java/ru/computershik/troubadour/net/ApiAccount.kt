@@ -889,6 +889,29 @@ private fun Api.channelFrom(body: JSONObject): ChannelPage? {
  * плейлист, а в контексте просмотра, и запрашиваются по голому
  * идентификатору. Обычным плейлистам, наоборот, нужна приставка `VL`.
  */
+/**
+ * Продолжение подборки — тем же, кто грузил первую страницу.
+ *
+ * Общее продолжение ходит анонимным WEB-клиентом. Для открытого плейлиста
+ * это сходит, а «Понравившиеся» (`LL`), «Смотреть позже» и закрытые
+ * подборки анонимно не отдаются вовсе: на iOS список обрывался на первой
+ * странице, после пятнадцати роликов.
+ */
+fun Api.playlistContinuation(continuation: String?): Api.Feed? {
+    if (continuation.isNullOrEmpty()) {
+        return null
+    }
+
+    val signedIn = Auth.isSignedIn()
+
+    return feedFrom(
+        post(
+            "browse", JSONObject().put("continuation", continuation),
+            if (signedIn) "TVHTML5" else "WEB", signedIn, 0.0
+        )
+    )
+}
+
 fun Api.playlist(playlistId: String?): PlaylistPage? {
     var identifier = playlistId ?: return null
 

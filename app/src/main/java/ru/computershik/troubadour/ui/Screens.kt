@@ -26,6 +26,7 @@ import ru.computershik.troubadour.net.channel
 import ru.computershik.troubadour.net.subscriptions
 import ru.computershik.troubadour.net.channelTab
 import ru.computershik.troubadour.net.playlist
+import ru.computershik.troubadour.net.playlistContinuation
 import ru.computershik.troubadour.net.search
 import ru.computershik.troubadour.net.searchSuggestions
 import ru.computershik.troubadour.net.setSubscribed
@@ -433,7 +434,7 @@ class PlaylistScreen(
 
         feed.source = { token ->
             if (!token.isNullOrEmpty()) {
-                val more = Api.browseContinuation(token)
+                val more = Api.playlistContinuation(token)
 
                 if (more == null) null else FeedList.Page(more.items, more.continuation)
             } else {

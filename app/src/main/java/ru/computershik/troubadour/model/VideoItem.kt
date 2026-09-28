@@ -66,8 +66,31 @@ class VideoItem {
      * Приходит в `watchEndpoint.startTimeSeconds` у той же плитки, где
      * лежит доля просмотра. Ноль — начинать сначала: так сервер отвечает
      * и о недосмотренных с начала, и о досмотренных до конца.
+     *
+     * Не назвал, а долю дал — место считается по доле и длительности.
+     * Иначе ролик с полоской просмотра на карточке начинался сначала.
+     * Досмотренный почти до конца (от 95 %) начинается сначала, как и
+     * у самого YouTube.
      */
     var resumeAt: Double = 0.0
+        get() {
+            if (field > 0) {
+                return field
+            }
+
+            if (isLive || watchedShare <= 0 || watchedShare >= 0.95) {
+                return 0.0
+            }
+
+            val length = secondsInDuration(duration)
+
+            if (length <= 0) {
+                return 0.0
+            }
+
+            // Пара секунд назад — чтобы не начать с полуслова.
+            return maxOf(0.0, Math.floor(length * watchedShare) - 2.0)
+        }
 
     /**
      * Вертикальный ролик. Отмечается при разборе Shorts и нужен карточке:
@@ -1018,4 +1041,21 @@ class VideoItem {
             return items
         }
     }
+}
+
+/** Длительность с карточки («1:02:03», «4:05») в секундах; не разобрали — ноль. */
+private fun secondsInDuration(text: String?): Double {
+    if (text.isNullOrEmpty()) {
+        return 0.0
+    }
+
+    var total = 0.0
+
+    for (part in text.trim().split(":")) {
+        val value = part.trim().toIntOrNull() ?: return 0.0
+
+        total = total * 60 + value
+    }
+
+    return total
 }

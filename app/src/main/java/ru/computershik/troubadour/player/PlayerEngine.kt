@@ -31,6 +31,7 @@ import ru.computershik.troubadour.net.isUpcomingBroadcast
 import ru.computershik.troubadour.net.offlineSlateTextIn
 import ru.computershik.troubadour.net.scheduledStartIn
 import ru.computershik.troubadour.net.mediaUserAgent
+import ru.computershik.troubadour.net.notePendingWatchPosition
 import ru.computershik.troubadour.net.playerResponse
 import ru.computershik.troubadour.net.reportWatched
 import ru.computershik.troubadour.net.setStreamUserAgent
@@ -88,6 +89,17 @@ object PlayerEngine {
 
     /** Ответ `/player` — из него берут субтитры, раскадровку и сигналы. */
     var playerJson: JSONObject? = null
+
+    /**
+     * Откуда брать адреса сигналов просмотра.
+     *
+     * Первый ответ `/player` — от имени выбранного канала. Запасные пути
+     * (iOS для эфира, ANDROID_VR для готовых адресов) подменяют
+     * [playerJson], а их сигналы подписаны на другого клиента и не на тот
+     * канал: на iOS-версии просмотр тогда уходил мимо истории второго
+     * канала.
+     */
+    private var trackingJson: JSONObject? = null
         private set
 
     /** Готовые дорожки; пусто — играем подачей. */
@@ -377,6 +389,8 @@ object PlayerEngine {
         formats = emptyList()
         heights = emptyList()
         playerJson = null
+        trackingJson = null
+        pendingNotedAt = 0L
         readyHeight = 0
         seekedTo = if (startAt > 0) startAt else -1.0
 
@@ -394,6 +408,11 @@ object PlayerEngine {
         }
 
         playerJson = player
+
+        // Адреса сигналов просмотра — из этого ответа, что бы ни было дальше.
+        if (Json.obj(player, "playbackTracking") != null) {
+            trackingJson = player
+        }
 
         var ready = Streams.formatsFrom(player)
 
@@ -1238,6 +1257,7 @@ object PlayerEngine {
             Notify.post(PROGRESS)
 
             reportIfDue()
+            notePendingPosition()
             forgetOldSegments()
 
             mainAfter(250) { run() }
@@ -1290,9 +1310,29 @@ object PlayerEngine {
         sendWatchSegment(false)
     }
 
+    private var pendingNotedAt = 0L
+
+    /** Раз в пять секунд — место показа в незакрытую запись просмотра. */
+    private fun notePendingPosition() {
+        val now = System.currentTimeMillis()
+
+        if (now - pendingNotedAt < 5000L) {
+            return
+        }
+
+        pendingNotedAt = now
+
+        val id = videoId ?: return
+        val at = position()
+
+        if (at > 0) {
+            async { Api.notePendingWatchPosition(at, id) }
+        }
+    }
+
     /** Отрезок от прошлой отметки до нынешнего места показа. */
     private fun sendWatchSegment(final: Boolean) {
-        val json = playerJson ?: return
+        val json = trackingJson ?: playerJson ?: return
 
         var at = position()
 
@@ -1655,6 +1695,7 @@ object PlayerEngine {
         formats = emptyList()
         heights = emptyList()
         playerJson = null
+        trackingJson = null
         videoId = null
         seekedTo = -1.0
         reportedAt = 0

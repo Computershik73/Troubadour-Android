@@ -1,6 +1,8 @@
 package ru.computershik.troubadour.net
 
+import android.content.Context
 import org.json.JSONObject
+import ru.computershik.troubadour.App
 import ru.computershik.troubadour.Log
 import java.util.Locale
 
@@ -570,9 +572,53 @@ private fun Api.pingStats(url: String) {
     builder.header("User-Agent", Api.TV_USER_AGENT)
     builder.header("Referer", "https://www.youtube.com/tv")
 
+    /**
+     * Чей это просмотр — если каналов у учётной записи несколько.
+     *
+     * Тела у сигнала нет, и `onBehalfOfUser`, которым мы называем канал
+     * во всех остальных запросах, сюда не положить. Без него сервер
+     * записывал просмотр на основной канал: на втором история не
+     * пополнялась и место не запоминалось. TV-клиент в каждом сигнале
+     * шлёт `X-YouTube-DataSync-Id` — пару, которую сервер дал выбранному
+     * каналу в списке каналов, — и мы шлём то же.
+     */
+    val datasync = activeAccountDatasync
+    var profile = false
+
+    if (!datasync.isNullOrEmpty() && token.isNotEmpty()) {
+        builder.header("X-YouTube-DataSync-Id", datasync)
+
+        /**
+         * У профиля — ещё и `X-Goog-PageId` с ним самим.
+         *
+         * Одной пары было мало: с ней история второго канала так и не
+         * пополнялась (проверено на iOS). Дамп youtube.com/tv, снятый на
+         * втором канале, показал разницу: в каждом сигнале рядом с парой
+         * «профиль||владелец» стоит `X-Goog-PageId` с первой её половиной.
+         * У основного канала пара вида «владелец||», и этого заголовка
+         * TV-клиент не шлёт — не шлём и мы.
+         */
+        val bar = datasync.indexOf("||")
+
+        if (bar > 0 && bar + 2 < datasync.length) {
+            builder.header("X-Goog-PageId", datasync.substring(0, bar))
+            profile = true
+        }
+    }
+
     val answer = Http.send(builder.build(), 4096, caching = false)
 
-    Log.d { "[YouTube/История] Сигнал: код ${answer.statusCode}" }
+    Log.d {
+        val path = try {
+            java.net.URI(url).path
+        } catch (error: Exception) {
+            null
+        }
+
+        "[YouTube/История] Сигнал $path: код ${answer.statusCode}, канал " +
+            (if (datasync.isNullOrEmpty() || token.isEmpty()) "по умолчанию" else datasync) +
+            (if (profile) ", профиль" else "")
+    }
 }
 
 /**
@@ -643,6 +689,11 @@ fun Api.reportWatched(
     val at = maxOf(position, 0.0)
     val opening = from < 0
 
+    // Запись — до сигналов: снимут посреди запроса, и она всё равно дойдёт.
+    if (!final) {
+        keepPendingWatch(videoId, playback, watchtime, length, at, !opening)
+    }
+
     /**
      * Сигнал `playback` — только при начале показа: он открывает запись,
      * и повторять его на каждом отрезке незачем.
@@ -694,9 +745,214 @@ fun Api.reportWatched(
         pingStats(url.toString())
     }
 
+    if (final) {
+        forgetPendingWatch()
+    } else if (opening) {
+        markPendingWatchOpened(videoId)
+    }
+
     Log.d {
         "[YouTube/История] $videoId: отрезок ${(if (opening) 0.0 else maxOf(from, 0.0)).toInt()}…" +
             "${at.toInt()} с, показ на ${at.toInt()} с" +
             (if (final) ", запись закрыта" else "")
     }
+}
+
+// --- Незакрытая запись просмотра ---------------------------------------
+
+private const val PENDING_STORE = "troubadour"
+private const val PENDING_WATCH_KEY = "YTPendingWatch"
+
+/** Дольше этого запись не досылаем: адреса сигналов к тому времени чужие. */
+private const val PENDING_WATCH_LIFE = 6 * 3600 * 1000L
+
+private val pendingLock = Any()
+
+private val pendingStore
+    get() = App.require().getSharedPreferences(PENDING_STORE, Context.MODE_PRIVATE)
+
+private fun pendingRecord(): JSONObject? {
+    val text = pendingStore.getString(PENDING_WATCH_KEY, null) ?: return null
+
+    return try {
+        JSONObject(text)
+    } catch (error: Exception) {
+        null
+    }
+}
+
+/**
+ * Сразу на диск, а не когда-нибудь.
+ *
+ * Запись нужна ровно на случай, когда процесс снимут без предупреждения, —
+ * отложенная запись `apply` в такой момент и теряется.
+ */
+private fun savePendingRecord(record: JSONObject?) {
+    val editor = pendingStore.edit()
+
+    if (record == null) {
+        editor.remove(PENDING_WATCH_KEY)
+    } else {
+        editor.putString(PENDING_WATCH_KEY, record.toString())
+    }
+
+    editor.commit()
+}
+
+private fun Api.keepPendingWatch(
+    videoId: String?,
+    playback: String?,
+    watchtime: String?,
+    length: Double,
+    reported: Double,
+    opened: Boolean
+) {
+    if (videoId.isNullOrEmpty() || watchtime.isNullOrEmpty()) {
+        return
+    }
+
+    synchronized(pendingLock) {
+        val old = pendingRecord()
+
+        // Открытие уже дошло раньше — не забываем об этом на следующих отрезках.
+        val wasOpened = old?.optString("videoId") == videoId && old.optBoolean("opened")
+
+        val record = JSONObject()
+
+        record.put("videoId", videoId)
+        record.put("watchtime", watchtime)
+
+        if (!playback.isNullOrEmpty()) {
+            record.put("playback", playback)
+        }
+
+        record.put("length", length)
+        record.put("reported", reported)
+        record.put("position", reported)
+        record.put("opened", opened || wasOpened)
+        record.put("channel", activeAccountDatasync ?: "")
+        record.put("savedAt", System.currentTimeMillis())
+
+        savePendingRecord(record)
+    }
+}
+
+private fun markPendingWatchOpened(videoId: String?) {
+    synchronized(pendingLock) {
+        val record = pendingRecord() ?: return
+
+        if (record.optString("videoId") != videoId) {
+            return
+        }
+
+        record.put("opened", true)
+
+        savePendingRecord(record)
+    }
+}
+
+private fun forgetPendingWatch() {
+    synchronized(pendingLock) {
+        if (pendingStore.contains(PENDING_WATCH_KEY)) {
+            savePendingRecord(null)
+        }
+    }
+}
+
+/**
+ * Место показа — в запись, чтобы досылать было с чем.
+ *
+ * Отрезки уходят раз в сорок секунд, и снятый между ними процесс унёс бы
+ * всё, что досмотрели после последнего. Плеер отмечает место чаще.
+ */
+fun Api.notePendingWatchPosition(position: Double, videoId: String?) {
+    if (!(position > 0) || videoId.isNullOrEmpty()) {
+        return
+    }
+
+    synchronized(pendingLock) {
+        val record = pendingRecord() ?: return
+
+        if (record.optString("videoId") != videoId) {
+            return
+        }
+
+        record.put("position", position)
+
+        savePendingRecord(record)
+    }
+}
+
+/**
+ * Дослать запись, которую прошлый запуск не закрыл.
+ *
+ * Систему, снимающую процесс посреди ролика, приложение не переубедит:
+ * ролик тогда не попадает в историю, а место не запоминается — открывающий
+ * сигнал уходит через несколько секунд после начала показа, закрывающий
+ * не уходит вовсе. Досылаем с тем, что успели досмотреть: не дошло
+ * открытие — открытие и отрезок до места, дошло — последний отрезок
+ * и конец записи.
+ */
+fun Api.flushPendingWatch() {
+    val record = synchronized(pendingLock) { pendingRecord() } ?: return
+
+    val videoId = record.optString("videoId")
+    val age = System.currentTimeMillis() - record.optLong("savedAt")
+    val channel = activeAccountDatasync ?: ""
+
+    val signedIn = Auth.isSignedIn()
+    val fresh = age in 0..PENDING_WATCH_LIFE
+    val sameChannel = record.optString("channel") == channel
+
+    if (!signedIn || videoId.isEmpty() || !fresh || !sameChannel) {
+        Log.d {
+            "[YouTube/История] Прерванную запись $videoId не досылаем: " +
+                when {
+                    !signedIn -> "вход не поднят"
+                    !fresh -> "слишком старая"
+                    else -> "канал другой"
+                }
+        }
+
+        forgetPendingWatch()
+
+        return
+    }
+
+    val position = maxOf(record.optDouble("position", 0.0), 1.0)
+    var reported = record.optDouble("reported", 0.0)
+    val length = record.optDouble("length", 0.0)
+    val opened = record.optBoolean("opened")
+
+    val tracking = JSONObject()
+
+    tracking.put("videostatsWatchtimeUrl", JSONObject().put("baseUrl", record.optString("watchtime")))
+
+    val playback = record.optString("playback")
+
+    if (playback.isNotEmpty()) {
+        tracking.put("videostatsPlaybackUrl", JSONObject().put("baseUrl", playback))
+    }
+
+    val details = JSONObject()
+
+    details.put("videoId", videoId)
+    details.put("lengthSeconds", String.format(Locale.US, "%.0f", length))
+
+    val json = JSONObject()
+
+    json.put("playbackTracking", tracking)
+    json.put("videoDetails", details)
+
+    Log.d {
+        "[YouTube/История] Досылаем запись, прерванную прошлым запуском: $videoId " +
+            "до ${position.toInt()} с" + (if (opened) "" else ", открытие не дошло")
+    }
+
+    if (!opened) {
+        reportWatched(json, position, -1.0, 0.0, false)
+        reported = position
+    }
+
+    reportWatched(json, position, reported, maxOf(0.0, position - reported), true)
 }

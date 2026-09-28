@@ -1578,10 +1578,66 @@ class PlayerScreen(
             }
         }
 
-        async {
-            val page = Api.videoDetails(videoId, playlistId)
+        val forVideo = videoId
 
-            main { applyDetails(page) }
+        async {
+            val page = Api.videoDetails(forVideo, playlistId)
+
+            main {
+                applyDetails(page)
+
+                if (page == null && videoId == forVideo) {
+                    retryDetails(forVideo, 1)
+                }
+            }
+        }
+    }
+
+    /**
+     * Сведения о ролике не пришли — просим ещё, с нарастающей паузой.
+     *
+     * Прежде неудача была окончательной: страница так и оставалась без
+     * названия, канала и оценок, хотя ролик играл. А случается она чаще
+     * всего на минутном провале связи — и сразу за провалом тот же запрос
+     * прошёл бы. Четыре попытки за полминуты: дольше ждать нет смысла,
+     * человек уже смотрит.
+     */
+    private fun retryDetails(forVideo: String, attempt: Int) {
+        if (attempt > 4) {
+            Log.d { "[YouTube/Плеер] Сведения о ролике так и не пришли — сдаёмся" }
+
+            return
+        }
+
+        val delay = 3000L * attempt
+
+        Log.d {
+            "[YouTube/Плеер] Сведения о ролике не пришли — попытка ${attempt + 1} " +
+                "через ${delay / 1000} с"
+        }
+
+        mainAfter(delay) {
+            if (videoId != forVideo) {
+                return@mainAfter
+            }
+
+            async {
+                val page = Api.videoDetails(forVideo, playlistId)
+
+                main {
+                    if (videoId != forVideo) {
+                        return@main
+                    }
+
+                    if (page != null) {
+                        Log.d { "[YouTube/Плеер] Сведения о ролике пришли с попытки ${attempt + 1}" }
+
+                        applyDetails(page)
+                    } else {
+                        retryDetails(forVideo, attempt + 1)
+                    }
+                }
+            }
         }
     }
 

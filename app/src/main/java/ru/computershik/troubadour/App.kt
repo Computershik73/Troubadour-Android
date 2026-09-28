@@ -3,7 +3,9 @@ package ru.computershik.troubadour
 import android.app.Application
 import android.content.Context
 import android.os.Build
+import ru.computershik.troubadour.net.Api
 import ru.computershik.troubadour.net.Auth
+import ru.computershik.troubadour.net.flushPendingWatch
 import ru.computershik.troubadour.net.NSig
 import ru.computershik.troubadour.net.PoToken
 import ru.computershik.troubadour.net.WebAuth
@@ -138,6 +140,16 @@ class App : Application() {
          * расшифровка `n`, которой окно не нужно.
          */
         NSig.prepare()
+
+        /**
+         * Запись просмотра, которую прошлый запуск не закрыл, — досылаем.
+         *
+         * Не сразу: первые секунды заняты входом и первыми экранами,
+         * а сигналу торопиться некуда.
+         */
+        ru.computershik.troubadour.ui.mainAfter(8000) {
+            ru.computershik.troubadour.ui.async { Api.flushPendingWatch() }
+        }
     }
 
     /**
