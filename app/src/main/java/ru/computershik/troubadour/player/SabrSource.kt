@@ -1,8 +1,12 @@
 package ru.computershik.troubadour.player
 
 import android.net.Uri
+import com.google.android.exoplayer2.C
 import com.google.android.exoplayer2.extractor.Extractor
+import com.google.android.exoplayer2.extractor.ExtractorOutput
 import com.google.android.exoplayer2.extractor.ExtractorsFactory
+import com.google.android.exoplayer2.extractor.SeekMap
+import com.google.android.exoplayer2.extractor.SeekPoint
 import com.google.android.exoplayer2.extractor.mp4.FragmentedMp4Extractor
 import com.google.android.exoplayer2.source.MediaSource
 import com.google.android.exoplayer2.source.MergingMediaSource
@@ -93,6 +97,9 @@ class SabrDataSource(
     /** Сколько раз подряд подача не дала ничего нового. */
     private var empty = 0
 
+    /** Сколько удачных просьб подряд эфир обходил наш кусок стороной. */
+    private var liveMisses = 0
+
     override fun addTransferListener(transferListener: TransferListener) {
         // Слушателя переноса не заводим: считать байты этого источника
         // незачем — они не из сети, а из памяти.
@@ -170,7 +177,17 @@ class SabrDataSource(
             val start = segmentStart(sequence)
             val length = segmentDuration(sequence)
 
-            if (length > 0 && seconds >= start && seconds < start + length) {
+            /**
+             * Полсекунды допуска перед началом куска.
+             *
+             * У эфира звук открывается с места первого куска видео, а
+             * звуковой кусок начинается на доли секунды иначе (9104339,266
+             * против 9104339,25). Без допуска поиск промахивался, и звук
+             * ждал привязки через две лишние просьбы — шесть секунд до
+             * первого кадра. Предыдущий кусок, если он есть, накрывает
+             * это время и найдётся раньше: перебор идёт по возрастанию.
+             */
+            if (length > 0 && seconds >= start - 0.5 && seconds < start + length) {
                 return sequence
             }
 
@@ -473,7 +490,7 @@ class SabrDataSource(
              * в вечное — на пробе показ так и встал, тридцать восемь
              * секунд за две с половиной минуты.
              */
-            val head = sabr.liveHeadSeconds
+            val head = sabr.liveHeadNowSeconds()
 
             if (sabr.liveMode && head > 0 && from > head) {
                 val wait = minOf(from - head, 5.0)
@@ -555,6 +572,47 @@ class SabrDataSource(
                 }
 
                 continue
+            }
+
+            /**
+             * У эфира дыру переступаем и тогда, когда подача не пуста.
+             *
+             * Подача у эфира исправно отдаёт куски — только не наш:
+             * пропущенного сервер у трансляции не отдаёт никогда (часть №69
+             * прямо называет застрявший номер). Прежде шаг через дыру
+             * делался лишь по пустым ответам, а пустых не было — и источник
+             * вечно просил один и тот же кусок, пока показ стоял на
+             * загрузке. Две удачных просьбы мимо — и шагаем к ближайшему
+             * из пришедших.
+             */
+            if (more && sabr.liveMode && anchor < 0 && nextSequence > 0) {
+                val have = if (isVideo) {
+                    sabr.videoSegment(nextSequence)
+                } else {
+                    sabr.audioSegment(nextSequence)
+                }
+
+                if (have == null) {
+                    liveMisses++
+
+                    val forward = nextAvailableAfter(nextSequence)
+
+                    if (liveMisses >= 2 && forward > 0) {
+                        Log.d {
+                            "[YouTube/Источник] ${if (isVideo) "Видео" else "Звук"}: " +
+                                "куска $nextSequence эфир не отдаст — шагаем к $forward " +
+                                "(${segmentStart(forward).toInt()} с)"
+                        }
+
+                        nextSequence = forward
+                        liveMisses = 0
+                        empty = 0
+
+                        continue
+                    }
+                } else {
+                    liveMisses = 0
+                }
             }
 
             if (!more) {
@@ -825,8 +883,12 @@ object SabrSource {
      */
     private const val LOADING_STEP = 64 * 1024
 
-    private fun extractors(): ExtractorsFactory =
-        ExtractorsFactory { arrayOf<Extractor>(FragmentedMp4Extractor()) }
+    private fun extractors(live: Boolean = false): ExtractorsFactory =
+        if (live) {
+            ExtractorsFactory { arrayOf<Extractor>(LiveSeekableExtractor(FragmentedMp4Extractor())) }
+        } else {
+            ExtractorsFactory { arrayOf<Extractor>(FragmentedMp4Extractor()) }
+        }
 
     /**
      * Источник для плеера.
@@ -836,7 +898,7 @@ object SabrSource {
      */
     fun build(sabr: Sabr, startSeconds: Double): MediaSource {
         val video = ProgressiveMediaSource.Factory(
-            { SabrDataSource(sabr, true, startSeconds) }, extractors()
+            { SabrDataSource(sabr, true, startSeconds) }, extractors(sabr.liveMode)
         )
             .setContinueLoadingCheckIntervalBytes(LOADING_STEP)
             .createMediaSource(Uri.parse("sabr://video"))
@@ -855,7 +917,7 @@ object SabrSource {
         }
 
         val audio = ProgressiveMediaSource.Factory(
-            { SabrDataSource(sabr, false, startSeconds) }, extractors()
+            { SabrDataSource(sabr, false, startSeconds) }, extractors(sabr.liveMode)
         )
             .setContinueLoadingCheckIntervalBytes(LOADING_STEP)
             .createMediaSource(Uri.parse("sabr://audio"))
@@ -903,4 +965,40 @@ object SabrSource {
 
         return MergingMediaSource(video, audio)
     }
+}
+
+/**
+ * Разборщик эфира: перематывать по нему «можно» всегда.
+ *
+ * У трансляции нет карты фрагментов (`sidx`), и разборщик честно сообщает
+ * ExoPlayer, что перемотка невозможна. А ExoPlayer любую перемотку по
+ * такому источнику сводит к нулю. Время же внутри кусков эфира абсолютное —
+ * девять миллионов секунд от начала вещания. Выходило так: плеер стоит
+ * на нуле, набранное лежит на девятимиллионной секунде, по его счёту
+ * впереди набраны годы — он перестаёт грузить, а показывать ему нечего.
+ * Это и есть «Playback stuck buffering and not loading», по четыре раза
+ * подряд на старте эфира.
+ *
+ * Случалось это не всегда: если данные запаздывали, перемотка успевала
+ * раньше карты и срабатывала. Теперь карта у эфира говорит «можно»,
+ * а точка перемотки всегда в начале данных — источник и без того
+ * открывается с нужного места и сам шлёт заголовок.
+ */
+private class LiveSeekableExtractor(private val inner: Extractor) : Extractor by inner {
+    override fun init(output: ExtractorOutput) {
+        inner.init(object : ExtractorOutput by output {
+            override fun seekMap(seekMap: SeekMap) {
+                output.seekMap(if (seekMap.isSeekable) seekMap else AnywhereSeekMap)
+            }
+        })
+    }
+}
+
+private object AnywhereSeekMap : SeekMap {
+    override fun isSeekable(): Boolean = true
+
+    override fun getDurationUs(): Long = C.TIME_UNSET
+
+    override fun getSeekPoints(timeUs: Long): SeekMap.SeekPoints =
+        SeekMap.SeekPoints(SeekPoint(timeUs, 0))
 }

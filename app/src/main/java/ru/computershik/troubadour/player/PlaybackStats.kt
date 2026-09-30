@@ -46,6 +46,24 @@ object PlaybackStats {
         }
     }
 
+    /**
+     * Скорость по отдельно измеренному отрезку — без учёта в общем счёте.
+     *
+     * Подача мерит установившуюся часть тела ответа, а весь ответ
+     * считает в общий счёт отдельно, через [noteTransfer] с нулём.
+     */
+    fun noteSpeed(count: Long, elapsedMs: Long) {
+        if (count < 16 * 1024 || elapsedMs < 300) {
+            return
+        }
+
+        synchronized(lock) {
+            val sample = count * 8.0 / elapsedMs
+
+            kbps = if (kbps <= 0) sample else kbps * 0.7 + sample * 0.3
+        }
+    }
+
     /** Всего принято байт за жизнь процесса. */
     fun totalBytes(): Long = synchronized(lock) { bytes }
 

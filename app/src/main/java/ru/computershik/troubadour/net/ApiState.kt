@@ -545,18 +545,41 @@ fun Api.setNotifications(state: Int, channelId: String?): Boolean {
     return json != null
 }
 
-/** Метка воспроизведения — шестнадцать знаков, как у TV-клиента. */
-internal fun Api.playbackNonce(): String {
-    val alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
-    val random = java.security.SecureRandom()
+private val nonceLock = Any()
+private var nonceValue: String? = null
+private var nonceOwner: String? = null
 
-    val nonce = StringBuilder(16)
+/**
+ * Метка показа — шестнадцать знаков, как у TV-клиента, **одна на ролик**.
+ *
+ * Прежде на каждый вызов бралась новая, и каждый сигнал просмотра и
+ * каждая просьба к подаче приходили от «другого» показа. На iOS-версии
+ * это и было причиной того, что сервер не видел продолжения: TV-клиент
+ * держит одну метку весь показ и ставит её в каждый запрос за видео.
+ */
+internal fun Api.playbackNonceFor(videoId: String?): String {
+    synchronized(nonceLock) {
+        val key = videoId ?: ""
+        val current = nonceValue
 
-    for (index in 0 until 16) {
-        nonce.append(alphabet[random.nextInt(alphabet.length)])
+        if (current != null && nonceOwner == key) {
+            return current
+        }
+
+        val alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+        val random = java.security.SecureRandom()
+
+        val fresh = StringBuilder(16)
+
+        for (index in 0 until 16) {
+            fresh.append(alphabet[random.nextInt(alphabet.length)])
+        }
+
+        nonceValue = fresh.toString()
+        nonceOwner = key
+
+        return fresh.toString()
     }
-
-    return nonce.toString()
 }
 
 /** Один служебный сигнал; отказ не беда, историю он не ломает. */
@@ -682,7 +705,7 @@ fun Api.reportWatched(
      * у TV-клиента: сигналы должны выглядеть так же, как от него, иначе
      * просмотр не засчитывается.
      */
-    val common = "&cpn=${playbackNonce()}&ver=2&fs=0&volume=100&muted=0&state=playing" +
+    val common = "&cpn=${playbackNonceFor(videoId)}&ver=2&fs=0&volume=100&muted=0&state=playing" +
         "&c=TVHTML5&cver=${clientVersion("TVHTML5")}&cplayer=UNIPLAYER&cmodel=SmartTV" +
         "&cos=Tizen&cosver=5.0&cplatform=TV&ctheme=CLASSIC&hl=${hl()}&cr=${gl()}"
 

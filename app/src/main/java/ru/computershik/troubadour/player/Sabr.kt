@@ -3,7 +3,9 @@ package ru.computershik.troubadour.player
 import android.util.Base64
 import ru.computershik.troubadour.App
 import ru.computershik.troubadour.Log
+import ru.computershik.troubadour.Settings
 import ru.computershik.troubadour.net.Api
+import ru.computershik.troubadour.net.playbackNonceFor
 import ru.computershik.troubadour.net.Http
 import ru.computershik.troubadour.net.NSig
 import ru.computershik.troubadour.net.mediaUserAgent
@@ -13,6 +15,10 @@ import java.io.ByteArrayOutputStream
 /** Дорожка так, как её называет подача: номер, время правки, метки. */
 class SabrFormat(val itag: Int, val lastModified: Long) {
     var xtags: String? = null
+
+    /** Ступень и частота кадров — по ним строится заявление о возможностях. */
+    var height = 0
+    var fps = 0
 }
 
 /** Заголовок сегмента в потоке UMP. */
@@ -249,6 +255,93 @@ class Sabr(
     var liveHeadSeconds = 0.0
         private set
 
+    /**
+     * Предел отдачи из части №31 (поля 14/15), с; 0 — сервер не назвал.
+     *
+     * Это не голова эфира, а черта, до которой сервер отдаёт: на iOS
+     * журналы показали, что она лежит ровно на 10 с ниже головы и
+     * сервер блюдёт её беспощадно — время плеера за ней хоть на две
+     * секунды получает пустоту с частью №69.
+     */
+    @Volatile
+    var liveSeekSeconds = 0.0
+        private set
+
+    /** Когда сервер в последний раз назвал предел и голову, мс. */
+    private var liveSeekSeenAtMs = 0L
+    private var liveHeadSeenAtMs = 0L
+
+    /**
+     * Предел отдачи **на этот миг**, с; 0 — неизвестен.
+     *
+     * Сервер называет его только в ответах, а плеер, набрав запас,
+     * по полминуты ничего не просит. Эфир меж тем идёт в реальном
+     * времени: названный полминуты назад предел отстал на полминуты,
+     * и время плеера, отмеренное от него, уползало за минуту от края —
+     * сервер отвечал отказом с частью №69. Поэтому двигаем названное
+     * вперёд вместе с часами. На iOS этого не нужно: там подача
+     * спрашивает без перерывов.
+     */
+    private fun limitNowSeconds(): Double {
+        val now = System.currentTimeMillis()
+
+        if (liveSeekSeconds > 0) {
+            return liveSeekSeconds + (now - liveSeekSeenAtMs) / 1000.0
+        }
+
+        if (liveHeadSeconds > 0) {
+            return liveHeadSeconds + (now - liveHeadSeenAtMs) / 1000.0 - 10
+        }
+
+        return 0.0
+    }
+
+    /** Голова эфира на этот миг, с; 0 — неизвестна (см. [limitNowSeconds]). */
+    fun liveHeadNowSeconds(): Double {
+        if (liveHeadSeconds <= 0) {
+            return 0.0
+        }
+
+        return liveHeadSeconds + (System.currentTimeMillis() - liveHeadSeenAtMs) / 1000.0
+    }
+
+    /** Пришла часть №69 — следующий запрос обязан её подтвердить. */
+    private var ackResumePoint = false
+
+    /**
+     * Перечень дорожек назван — дальше молчим, как браузер.
+     *
+     * В дампе youtube.com/tv на сто десять запросов поле 17 стоит ровно
+     * однажды, в миг ручной смены качества. Называть весь набор в каждом
+     * запросе — значит каждый раз заново просить сервер решать, чем нас
+     * кормить.
+     */
+    private var toldFormats = false
+
+    /** До какого мига эфира мы уже переступили пропущенное, с. */
+    private var liveSkippedTo = 0.0
+
+    /** Удалась ли последняя просьба: от этого зависит пауза до следующей. */
+    @Volatile
+    private var lastGot = false
+
+    /**
+     * С какого мига просьбы у эфира идут пустыми подряд; 0 — последняя удалась.
+     *
+     * Застрявшей подачу считаем по этому, а не по «давно ничего не
+     * приходило», как на iOS. Там подача просит непрерывно, и тишина
+     * означает отказ. Здесь просит плеер, и, набрав запас, он сам
+     * замолкает на двадцать секунд, — по старой мерке это выглядело
+     * застреванием, и мы прыгали через пятнадцать секунд эфира зря.
+     */
+    private var emptySinceMs = 0L
+
+    /** Начало разговора с подачей — для поля 13 у эфира. */
+    private val sessionFromMs = System.currentTimeMillis()
+
+    /** Что в последний раз заявили о возможностях — для журнала. */
+    private var capsSaid: String? = null
+
     /** Когда пришёл последний кусок — по часам устройства, мс. */
     @Volatile
     var lastDeliveryAt = 0L
@@ -265,6 +358,14 @@ class Sabr(
      * и назвать меньше названного — значит попросить меньше.
      */
     var wantedHeight = 0
+        set(value) {
+            if (field != value) {
+                // Человек выбрал качество — называем набор заново.
+                toldFormats = false
+            }
+
+            field = value
+        }
 
     /** Длительность ролика в секундах; 0, пока сервер не сказал. */
     var duration = 0.0
@@ -282,6 +383,22 @@ class Sabr(
 
         /** Насколько далеко позади живого края эфиру позволено просить, мс. */
         private const val LIVE_REACH_MS = 40_000L
+
+        /** На сколько позади края начинать эфир, с (как `LIVE_BEHIND` у плеера). */
+        private const val LIVE_CUSHION_S = 30.0
+
+        /**
+         * С какого мига смотрится этот эфир — для поля 29.
+         *
+         * Поле 29 — время просмотра, мс. По нему сервер решает, держать ли
+         * запрос открытым до нарезки куска или ответить сразу: ниже ~3 с
+         * отвечает мгновенной пустотой, выше — придерживает и отдаёт кусок.
+         * Без этого поля эфир на iOS шёл сплошным опросом с пустыми
+         * ответами. Отсчёт — от первой живой просьбы и переживает новую
+         * подачу того же ролика.
+         */
+        private var watchedVideo: String? = null
+        private var watchedFromMs = 0L
 
 
 
@@ -344,6 +461,9 @@ class Sabr(
     fun setAvailable(video: List<SabrFormat>, audio: List<SabrFormat>) {
         allVideo = video
         allAudio = audio
+
+        // Набор сменился — серверу его надо назвать заново.
+        toldFormats = false
     }
 
     private fun xtagsFor(itag: Int, lastModified: Long): String? {
@@ -358,7 +478,25 @@ class Sabr(
         return null
     }
 
-    private fun isVideoItag(itag: Int): Boolean = allVideo.any { it.itag == itag }
+    /**
+     * Все видеодорожки ролика, а не только предложенные.
+     *
+     * Сервер вправе прислать дорожку не из нашего перечня. Когда видео
+     * узнавалось лишь по перечню, кусок 1080p60 записывался в звук —
+     * ролик вставал, а после перемотки падал декодер.
+     */
+    var knownVideoItags: Set<Int> = emptySet()
+
+    /**
+     * Кадр стоячий (Shorts) — в заявлении о возможностях стороны меняются.
+     *
+     * Иначе заявлено «1920 в ширину, 1080 в высоту», и вертикальный ролик
+     * 1080×1920 в него не помещается. Так же сделано и на iOS.
+     */
+    var portraitFrame = false
+
+    private fun isVideoItag(itag: Int): Boolean =
+        allVideo.any { it.itag == itag } || itag in knownVideoItags
 
     private fun tierForScreen(edge: Int): Int {
         val tiers = intArrayOf(144, 240, 360, 480, 720, 1080)
@@ -446,30 +584,215 @@ class Sabr(
 
         state.putVarint(wanted.toLong(), 21)
 
-        state.putBool(false, 22)
+        /**
+         * Время плеера. У эфира — место **показа**, а не набора: браузер
+         * набирает до головы, но в поле 28 ставит время на ~15 с ниже
+         * (дамп yttv5, разброс 10–15 с). Зритель вплотную к краю просит
+         * кусок в миг, когда его дорезают, — там куски и терялись.
+         */
+        var at = maxOf(0L, startMs)
 
-        state.putVarint(maxOf(0L, startMs), 28)
+        if (liveMode && at > 15000) {
+            at -= 15000
+        }
 
-        // Видно (1) и играет (0) — то же, что в образце.
-        state.putVarint(1, 34)
-        state.putFloat(1.0f, 35)
-        state.putVarint(0, 40)
-        state.putVarint(0, 44)
+        state.putVarint(at, 28)
 
         /**
-         * Ровный звук включён, VP9 не нужен вовсе.
+         * Скорость связи, бит/с — по ней сервер выбирает ступень при «Авто».
          *
-         * В оригинале причина была такая: «его не декодирует ни одно
-         * устройство из нашего списка». Здесь список открытый, и VP9
-         * многие устройства как раз декодируют, — но дорожки мы всё равно
-         * отбираем по `avc1`, а обещать серверу то, чего не возьмём,
-         * значит получить это вместо нужного.
+         * Без неё сервер не знал, что соединение медленное, и держал 720p60
+         * на трёх мегабитах: каждый пятисекундный кусок качался по шесть
+         * секунд, и показ стоял. Настоящий TV-клиент шлёт это поле всегда.
          */
-        state.putBool(true, 46)
+        val kbps = PlaybackStats.speedKbps()
+
+        if (kbps > 0) {
+            state.putVarint(kbps * 1000, 23)
+        }
+
+        if (liveMode) {
+            val now = System.currentTimeMillis()
+
+            synchronized(Sabr::class.java) {
+                if (watchedFromMs <= 0 || watchedVideo != videoId) {
+                    watchedVideo = videoId
+                    watchedFromMs = now
+                }
+            }
+
+            val watched = maxOf(0L, now - watchedFromMs)
+
+            state.putVarint(watched, 29)
+            state.putVarint(watched, 36)
+            state.putVarint(maxOf(0L, now - sessionFromMs), 13)
+
+            // В дампе той же волны поле 14 равно нулю во всех запросах.
+            state.putVarint(0, 14)
+
+            if (wanted > 0) {
+                state.putVarint(wanted.toLong(), 16)
+            }
+        }
+
+        // Видно (1) и играет (0); у эфира — ноль, как у браузера.
+        state.putVarint(if (liveMode) 0L else 1L, 34)
+
+        state.putMessage(capabilities(), 38)
+
+        state.putVarint(3, 40)
         state.putBool(false, 58)
+
+        // Длинная сторона экрана — но не меньше заявленного потолка.
+        state.putVarint(maxOf(side, capsCeiling()).toLong(), 59)
+
+        if (liveMode) {
+            state.putBool(true, 71)
+        }
+
+        val quality = ProtoWriter()
+
+        quality.putVarint(0, 1)
+        quality.putVarint(wanted.toLong(), 2)
+        quality.putVarint(0, 3)
+        quality.putVarint(0, 4)
+        quality.putVarint(0, 5)
+        quality.putVarint(0, 6)
+
+        state.putMessage(quality, 72)
+        state.putVarint(2, 73)
         state.putBool(false, 76)
 
+        // Три флага из дампа TV-клиента, как есть.
+        state.putData(
+            byteArrayOf(
+                0x0a, 0x04, 0x08, 0x01, 0x10, 0x00,
+                0x0a, 0x04, 0x08, 0x02, 0x10, 0x00,
+                0x0a, 0x04, 0x08, 0x02, 0x10, 0x01
+            ), 79
+        )
+
+        if (requestNumber == 0) {
+            state.putVarint(1, 80)
+        }
+
+        if (liveMode) {
+            state.putBool(true, 85)
+        }
+
         return state
+    }
+
+    /**
+     * Потолок и частота кадров, которые заявляем серверу, — по тому,
+     * что мы ему **предложили**, а не по тому, что умеет декодер.
+     *
+     * Декодер Xperia объявляет 4K, а шестьдесят кадров тянет только
+     * до 720p. Заявив «1080p и 60 кадров», мы получали от сервера 1080p60,
+     * которого не просили и не можем показать. Поэтому: выбрано руками —
+     * ступень выбора с её частотой; иначе — наибольшая шестидесятикадровая
+     * из предложенных (так и выбирал сервер, пока заявления не было),
+     * а без шестидесяти кадров — наибольшая вообще.
+     */
+    private fun offeredCaps(): IntArray {
+        var ceiling = 0
+        var frames = 30
+
+        if (wantedHeight > 0) {
+            ceiling = wantedHeight
+
+            for (format in allVideo) {
+                if (format.height == wantedHeight && format.fps > 31) {
+                    frames = 60
+                }
+            }
+        } else {
+            var sixty = 0
+            var any = 0
+
+            for (format in allVideo) {
+                any = maxOf(any, format.height)
+
+                if (format.fps > 31) {
+                    sixty = maxOf(sixty, format.height)
+                }
+            }
+
+            if (sixty > 0 && Settings.allowsSixtyFrames) {
+                ceiling = sixty
+                frames = 60
+            } else {
+                ceiling = any
+            }
+        }
+
+        if (ceiling <= 0) {
+            // Перечня ещё нет — по декодеру, но не выше 1080p: выше у H.264 дорожек нет.
+            ceiling = minOf(Capabilities.maxHeight().takeIf { it > 0 } ?: 1080, 1080)
+        }
+
+        return intArrayOf(ceiling, frames)
+    }
+
+    private fun capsCeiling(): Int = offeredCaps()[0]
+
+    /**
+     * Что устройство умеет: размер кадра, частота, пропускная способность.
+     *
+     * Поле 38 и его числа взяты у iOS-версии, а та — у дампа TV-клиента.
+     * Строится от **своего** потолка: дамп несёт 720p из h264ify, и
+     * повторённое как есть заявление закрывало нам всё выше.
+     * Кадров — шестьдесят, только если устройство их тянет и человек
+     * их не выключил: пока здесь стояло тридцать, шестидесяти кадров
+     * не бывало ни у записи, ни у эфира.
+     */
+    private fun capabilities(): ProtoWriter {
+        val offered = offeredCaps()
+
+        val ceiling = offered[0]
+        val frames = offered[1]
+
+        val longSide = ceiling * 16 / 9
+
+        // Та же доля, что у TV-клиента на 720p30, — пересчитанная на наш кадр.
+        val sample = 2684048.0 / (1280.0 * 720.0 * 30.0) *
+            ceiling.toDouble() * longSide.toDouble() * frames.toDouble()
+
+        val said = (if (portraitFrame) "${ceiling}x$longSide (кадр стоячий)" else "${longSide}x$ceiling") +
+            ", $frames кадр/с, поле 12 = ${sample.toLong()}"
+
+        if (said != capsSaid) {
+            capsSaid = said
+
+            Log.d { "[YouTube/Подача] Возможности: $said" }
+        }
+
+        val videoCap = ProtoWriter()
+
+        videoCap.putVarint(2, 1)
+        videoCap.putVarint(1, 2)
+        videoCap.putVarint((if (portraitFrame) longSide else ceiling).toLong(), 3)
+        videoCap.putVarint((if (portraitFrame) ceiling else longSide).toLong(), 4)
+        videoCap.putVarint(frames.toLong(), 11)
+        videoCap.putVarint(sample.toLong(), 12)
+        videoCap.putVarint(0, 15)
+
+        val audioCap = ProtoWriter()
+
+        audioCap.putVarint(1, 1)
+        audioCap.putVarint(2, 2)
+        audioCap.putVarint(0, 6)
+
+        val caps = ProtoWriter()
+
+        caps.putMessage(videoCap, 1)
+        caps.putMessage(audioCap, 2)
+        caps.putVarint(249, 4)
+        caps.putVarint(350, 4)
+        caps.putVarint(278, 4)
+        caps.putVarint(3, 5)
+
+        return caps
     }
 
     /**
@@ -623,24 +946,97 @@ class Sabr(
     private fun requestBodyFrom(startMs: Long): ByteArray {
         val request = ProtoWriter()
 
-        request.putMessage(clientState(startMs), 1)
+        request.putMessage(clientState(livePlayerMs(startMs)), 1)
 
         request.putData(config, 5)
 
         putBufferedRange(request, gotVideo, true)
         putBufferedRange(request, gotAudio, false)
 
-        for (format in allAudio) {
-            request.putMessage(formatId(format), 16)
-        }
+        /**
+         * Перечень дорожек — в первой просьбе, дальше молчим.
+         *
+         * Выбирает сервер, поэтому называем **все** дорожки, а не
+         * выбранную. Но называть их надо однажды: так делает
+         * TV-клиент, и так же с 1.6 делает iOS-версия.
+         */
+        if (!toldFormats) {
+            toldFormats = true
 
-        for (format in allVideo) {
-            request.putMessage(formatId(format), 17)
+            for (format in allAudio) {
+                request.putMessage(formatId(format), 16)
+            }
+
+            for (format in allVideo) {
+                request.putMessage(formatId(format), 17)
+            }
         }
 
         request.putMessage(streamerContext(), 19)
 
+        if (ackResumePoint) {
+            ackResumePoint = false
+
+            val ack = ProtoWriter()
+
+            ack.putVarint(7, 8)
+
+            request.putMessage(ack, 24)
+        }
+
         return request.data()
+    }
+
+    /**
+     * Время плеера для эфира — у края, а не у конца своего буфера.
+     *
+     * Правило выведено на iOS прямой пробой в браузере нашими же байтами:
+     * при одном и том же перечне набранного менялось только поле 28 —
+     * «край − 30» отдавал два куска, «край − 60» и дальше получал пустоту
+     * с частью №69. Отмерять от конца своего буфера — ловушка: подача
+     * запнулась, конец буфера замер, время плеера уползло назад, сервер
+     * отказывает, и подача стоит ещё дольше.
+     *
+     * Поэтому: предел отдачи минус 30 с, но не раньше конца набранного
+     * (иначе сервер шлёт заново то, что уже есть) и не ближе 2 с
+     * к пределу (за ним сервер не отдаёт ничего).
+     */
+    private fun livePlayerMs(startMs: Long): Long {
+        if (!liveMode) {
+            return startMs
+        }
+
+        val runs = heldRuns(true)
+
+        if (runs.isEmpty()) {
+            return startMs
+        }
+
+        val bufStart = runs.first()[2]
+        val bufEnd = runs.last()[3]
+
+        val limitMs = (limitNowSeconds() * 1000).toLong()
+
+        if (limitMs <= 0) {
+            // Края ещё не знаем — держимся конца набранного.
+            return if (bufEnd > bufStart) maxOf(bufStart, bufEnd - 12000) else startMs
+        }
+
+        var playerMs = limitMs - 30000
+
+        if (playerMs < bufEnd) {
+            playerMs = bufEnd
+        }
+
+        if (playerMs < bufStart) {
+            playerMs = bufStart
+        }
+
+        if (playerMs > limitMs - 2000) {
+            playerMs = limitMs - 2000
+        }
+
+        return playerMs
     }
 
     // --- Разбор ответа ----------------------------------------------------
@@ -707,15 +1103,41 @@ class Sabr(
         val reader = chunk.reader()
 
         var sequence = 0
+        var headMs = 0L
         var time = 0L
         var scale = 0L
+        var seek = 0L
+        var seekScale = 0L
 
         while (reader.next()) {
             when (reader.field) {
                 3 -> sequence = reader.takeVarint().toInt()
+                4 -> headMs = reader.takeVarint()
                 12 -> time = reader.takeVarint()
                 13 -> scale = reader.takeVarint()
+                14 -> seek = reader.takeVarint()
+                15 -> seekScale = reader.takeVarint()
             }
+        }
+
+        // Предел отдачи — по нему и держится время плеера (см. `livePlayerMs`).
+        if (seek > 0 && seekScale > 0) {
+            val first = liveSeekSeconds <= 0
+
+            liveSeekSeconds = seek.toDouble() / seekScale
+            liveSeekSeenAtMs = System.currentTimeMillis()
+
+            if (first) {
+                Log.d {
+                    "[YouTube/Подача] Эфир: предел отдачи на ${liveSeekSeconds.toInt()} с" +
+                        (if (headMs > 0) ", голова на ${headMs / 1000} с" else "")
+                }
+            }
+        }
+
+        if (headMs > 0) {
+            time = headMs
+            scale = 1000
         }
 
         /**
@@ -736,6 +1158,7 @@ class Sabr(
             }
 
             liveHeadSeconds = fresh
+            liveHeadSeenAtMs = System.currentTimeMillis()
         }
     }
 
@@ -849,6 +1272,8 @@ class Sabr(
 
             UmpPart.LIVE_HEAD -> parseLiveHead(chunk)
 
+            UmpPart.RESUME_POINT -> ackResumePoint = true
+
             UmpPart.NEXT_REQUEST_POLICY -> {
                 val reader = chunk.reader()
 
@@ -872,6 +1297,9 @@ class Sabr(
 
                             url = moved
                             redirected = true
+
+                            // Новый узел о прежних просьбах не знает — называем дорожки заново.
+                            toldFormats = false
 
                             /**
                              * Адрес переезда берём **как есть**.
@@ -1169,10 +1597,18 @@ class Sabr(
             redirected = false
 
             if (send(video, audio, startMs)) {
-                return true
+                return stepToLiveEdge(video, audio)
             }
 
             if (!redirected) {
+                /**
+                 * У эфира первый ответ бывает пуст — без единого куска,
+                 * зато с краем в части №31. Зная край, просим рядом с ним.
+                 */
+                if (liveMode && liveHeadSeconds > 0 && startMs == 0L) {
+                    return stepToLiveEdge(video, audio)
+                }
+
                 return false
             }
         }
@@ -1180,6 +1616,81 @@ class Sabr(
         Log.d { "[YouTube/Подача] Слишком много переездов" }
 
         return false
+    }
+
+    /**
+     * Начало эфира — у края, а не там, куда сервер поставил сам.
+     *
+     * Порт с iOS. Первый ответ эфира бывает пустым (часть №69 с номером,
+     * которого сервер не отдаст) или начинается далеко позади края.
+     * Тогда начинаем заново — за полминуты до края, ближе, у самого
+     * края, — пока не придёт кусок.
+     */
+    private fun stepToLiveEdge(video: SabrFormat?, audio: SabrFormat?): Boolean {
+        val empty = synchronized(vault) { videoSegments.isEmpty() }
+
+        if (!liveMode || liveHeadSeconds <= 0) {
+            return !empty || videoInit != null
+        }
+
+        val behind = liveHeadSeconds - liveStartSeconds
+
+        if (!empty && (liveStartSeconds <= 0 || behind < LIVE_CUSHION_S + 60)) {
+            return true
+        }
+
+        Log.d {
+            if (empty) {
+                "[YouTube/Подача] Эфир: первый ответ пуст — просим у края"
+            } else {
+                "[YouTube/Подача] Эфир: первый кусок на ${behind.toInt()} с позади края — " +
+                    "переходим к краю"
+            }
+        }
+
+        val targets = doubleArrayOf(
+            maxOf(0.0, liveHeadSeconds - LIVE_CUSHION_S),
+            maxOf(0.0, liveHeadSeconds - 15),
+            liveHeadSeconds
+        )
+
+        for (attempt in 0 until 3) {
+            val target = targets[attempt]
+
+            synchronized(vault) {
+                videoSegments.clear()
+                audioSegments.clear()
+                videoTimes.clear()
+                audioTimes.clear()
+            }
+
+            playbackCookie = null
+            requestNumber = 0
+            failures = 0
+            toldFormats = false
+
+            resetCounters((target * 1000).toLong())
+
+            // Начало эфира назначит первый же кусок, пришедший с нового места.
+            liveStartSeconds = 0.0
+
+            redirected = false
+
+            val sent = send(video, audio, (target * 1000).toLong()) ||
+                (redirected && send(video, audio, (target * 1000).toLong()))
+
+            if (sent && synchronized(vault) { videoSegments.isNotEmpty() }) {
+                return true
+            }
+
+            // Край мог сдвинуться, пока ходили, — следующая цель берётся свежей.
+            if (attempt == 0) {
+                targets[1] = maxOf(0.0, liveHeadSeconds - 15)
+                targets[2] = liveHeadSeconds
+            }
+        }
+
+        return synchronized(vault) { videoSegments.isNotEmpty() } || videoInit != null
     }
 
     private fun send(video: SabrFormat?, audio: SabrFormat?, startMs: Long): Boolean {
@@ -1217,17 +1728,24 @@ class Sabr(
         val ahead = if (liveMode) 15000L else 2000L
 
         if (startMs + 2000 < rangeStartMs || startMs > filledMs + ahead) {
-            synchronized(vault) {
-                videoSegments.clear()
-                audioSegments.clear()
-                videoTimes.clear()
-                audioTimes.clear()
+            /**
+             * У эфира набранное остаётся: прыжок там — это шаг через дыру
+             * к краю, а куски до дыры плеер ещё доиграет. Так же и на iOS.
+             */
+            if (!liveMode) {
+                synchronized(vault) {
+                    videoSegments.clear()
+                    audioSegments.clear()
+                    videoTimes.clear()
+                    audioTimes.clear()
+                }
             }
 
             resetCounters(startMs)
 
             Log.d {
-                "[YouTube/Подача] Прыжок на ${startMs / 1000} с — набранное сброшено"
+                "[YouTube/Подача] Прыжок на ${startMs / 1000} с — " +
+                    if (liveMode) "набранное остаётся" else "набранное сброшено"
             }
         }
 
@@ -1254,7 +1772,15 @@ class Sabr(
             }
         }
 
-        val address = "$url&rn=$requestNumber"
+        /**
+         * Метка показа и версия клиента — в каждом запросе, как у браузера.
+         *
+         * По метке сервер связывает просьбы в один просмотр; без неё
+         * каждая приходила «неизвестно от кого». `alr=yes` стоит в каждом
+         * адресе у браузера; чему служит — не знаю.
+         */
+        val address = "$url&alr=yes&cpn=${Api.playbackNonceFor(videoId)}" +
+            "&cver=${Api.clientVersion("TVHTML5")}&rn=$requestNumber"
 
         Log.d {
             fun describe(isVideo: Boolean): String {
@@ -1295,6 +1821,17 @@ class Sabr(
         val startedAt = android.os.SystemClock.elapsedRealtime()
 
         /**
+         * Скорость мерим по установившейся части тела — после первых 64 КБ.
+         *
+         * Мерка «всё полученное за всё время запроса» врёт вниз: в неё
+         * входит ожидание ответа, а у эфира сервер нарочно держит запрос
+         * открытым до нарезки куска (по пять секунд). Так же сделано и
+         * на iOS.
+         */
+        var steadyAt = 0L
+        var steadyBytes = 0
+
+        /**
          * Ответ читается **потоком**, а не целиком.
          *
          * В оригинале он собирался в память и разбирался после: ответы
@@ -1312,6 +1849,11 @@ class Sabr(
 
             received += length
 
+            if (steadyAt == 0L && received >= 64 * 1024) {
+                steadyAt = android.os.SystemClock.elapsedRealtime()
+                steadyBytes = received
+            }
+
             val data = collected.toByteArray()
 
             val left = Ump.read(data, data.size) { chunk -> handlePart(chunk) }
@@ -1325,10 +1867,15 @@ class Sabr(
             true
         }
 
-        PlaybackStats.noteTransfer(
-            received.toLong(),
-            android.os.SystemClock.elapsedRealtime() - startedAt
-        )
+        // В общий счёт — всё; в скорость — только установившуюся часть.
+        PlaybackStats.noteTransfer(received.toLong(), 0)
+
+        if (steadyAt > 0) {
+            PlaybackStats.noteSpeed(
+                (received - steadyBytes).toLong(),
+                android.os.SystemClock.elapsedRealtime() - steadyAt
+            )
+        }
 
         if (!response.isSuccessful || received == 0) {
             /**
@@ -1569,9 +2116,72 @@ class Sabr(
          * набранного. Настоящую дыру у края это закрыть позволяет,
          * а уехать от эфира — нет.
          */
+        if (liveMode && anchorMs < 0) {
+            timeMs = liveNextMs(timeMs)
+        }
+
         send(video, audio, timeMs)
 
-        return delivered > before
+        lastGot = delivered > before
+
+        if (lastGot) {
+            emptySinceMs = 0L
+        } else if (emptySinceMs == 0L) {
+            emptySinceMs = System.currentTimeMillis()
+        }
+
+        return lastGot
+    }
+
+    /**
+     * Докуда просить у эфира — с поправкой на то, что сервер не отдаёт.
+     *
+     * Правило с iOS. Просить дальше предела отдачи бесполезно — просим
+     * у предела. А если давно ничего не приходило и край ушёл дальше
+     * трёх кусков, мы целим в дыру: пропущенное у эфира сервер не отдаёт
+     * **никогда** (часть №69 прямо называет застрявший номер), и выйти
+     * помогает только просьба у края. Показу это не страшно: источник
+     * сам шагает к ближайшему из пришедших кусков.
+     */
+    private fun liveNextMs(needMs: Long): Long {
+        var next = needMs / 1000.0
+
+        val head = liveHeadNowSeconds()
+        val limit = limitNowSeconds()
+
+        val servable = if (liveSeekSeconds > 0) limit else head
+
+        if (servable > 0 && next > servable) {
+            next = servable
+        }
+
+        val stale = lastDeliveryAt <= 0 ||
+            (emptySinceMs > 0 && System.currentTimeMillis() - emptySinceMs > 15000)
+
+        if (stale && next > 0 && head > next + 15) {
+            val from = maxOf(next, liveSkippedTo)
+
+            val edge = if (head - from > 60) {
+                maxOf(0.0, limit - 10)
+            } else {
+                minOf(from + 15, maxOf(0.0, limit - 10))
+            }
+
+            if (edge > next) {
+                if (liveSkippedTo < edge) {
+                    liveSkippedTo = edge
+
+                    Log.d {
+                        "[YouTube/Подача] Эфир: край ушёл на ${(head - next).toInt()} с " +
+                            "вперёд — пропущенное не ждём, просим с ${edge.toInt()} с"
+                    }
+                }
+
+                next = edge
+            }
+        }
+
+        return (next * 1000).toLong()
     }
 
     /**
@@ -1781,7 +2391,23 @@ class Sabr(
      * Потолок — полторы секунды: дольше ждать нет смысла, у плеера свой
      * сторож, а сервер обычно просит десятые доли.
      */
-    fun backoff(): Double = minOf(1.5, maxOf(0.0, backoffMs / 1000.0))
+    /**
+     * Сколько ждать перед следующей просьбой, с.
+     *
+     * У записи — не больше полутора секунд: у плеера свой сторож.
+     * У эфира паузу из части №35 исполняем целиком, до шести секунд.
+     * Обрезая её, мы спрашивали вдвое чаще настоящего клиента (у него
+     * медиана 4,98 с между запросами) и получали от сервера `4=5000` —
+     * прямую просьбу перестать. После удачной просьбы — короткая пауза:
+     * запрос у края и так держится открытым до нарезки куска.
+     */
+    fun backoff(): Double {
+        if (liveMode) {
+            return if (lastGot) 0.3 else minOf(6.0, maxOf(0.5, backoffMs / 1000.0))
+        }
+
+        return minOf(1.5, maxOf(0.0, backoffMs / 1000.0))
+    }
 
     private fun resetCounters(startMs: Long) {
         firstVideoSeq = 0

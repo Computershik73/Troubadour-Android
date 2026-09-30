@@ -12,7 +12,7 @@ import android.view.ViewGroup
 import android.widget.TextView
 import org.json.JSONObject
 import ru.computershik.troubadour.net.Api
-import ru.computershik.troubadour.net.playbackNonce
+import ru.computershik.troubadour.net.playbackNonceFor
 import ru.computershik.troubadour.player.PlaybackStats
 import ru.computershik.troubadour.player.PlayerEngine
 import ru.computershik.troubadour.ui.Metrics.dp
@@ -161,7 +161,7 @@ class StatsPanel(context: Context) : ViewGroup(context) {
         val sabr = PlayerEngine.sabr
         val json = PlayerEngine.playerJson
 
-        set(0, "${PlayerEngine.videoId ?: "—"} / ${Api.playbackNonce()}")
+        set(0, "${PlayerEngine.videoId ?: "—"} / ${Api.playbackNonceFor(PlayerEngine.videoId)}")
 
         // Окно: размер кадра в точках и плотность — как на сайте.
         val stage = parent as? PlayerStage

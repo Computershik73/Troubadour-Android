@@ -566,7 +566,37 @@ object PlayerEngine {
                  * начать «с нуля» бессмысленно — такого куска нет
                  * и не будет, и плеер встаёт навсегда.
                  */
-                val from = if (stream.liveMode && stream.liveStartSeconds > 0) {
+                /**
+                 * Подача уже начала позади края — второй раз не отступаем.
+                 *
+                 * С переносом с iOS подача сама встаёт в полуминуте от края
+                 * (`stepToLiveEdge`). Отступив от её первого куска ещё на
+                 * тридцать секунд, мы просили то, чего сервер не отдаёт,
+                 * и до первого кадра проходило сорок шесть секунд.
+                 */
+                val deep = stream.liveMode && stream.liveHeadSeconds > 0 &&
+                    stream.liveHeadSeconds - stream.liveStartSeconds >= LIVE_BEHIND
+
+                val from = if (deep) {
+                    /**
+                     * Запас перед пуском — хотя бы три куска.
+                     *
+                     * Плеер начинает с полусекунды набранного, а у эфира
+                     * подача отдаёт по куску на просьбу. С одним куском
+                     * в запасе первые полминуты шли подгрузками по
+                     * полторы-семь секунд. Позади края куски уже нарезаны,
+                     * и три штуки приходят за несколько секунд.
+                     */
+                    for (fill in 0 until 6) {
+                        if (stream.videoSequences().size >= 3) {
+                            break
+                        }
+
+                        stream.requestMoreFrom(stream.liveEdgeSeconds())
+                    }
+
+                    stream.liveStartSeconds
+                } else if (stream.liveMode && stream.liveStartSeconds > 0) {
                     /**
                      * Отступаем от живого края на несколько кусков.
                      *
@@ -810,7 +840,24 @@ object PlayerEngine {
 
         val ready = ensurePlayer()
 
-        ready.setMediaSource(source)
+        /**
+         * Подаче место — вместе с источником, одним вызовом.
+         *
+         * Источник подачи начинает с того места, с которого его собрали,
+         * и время в кусках у него настоящее. Плеер же без подсказки
+         * начинает с нуля. У эфира место задавал `seekTo` сразу после
+         * `prepare`, и это гонка: когда куски уже лежали в памяти, источник
+         * успевал сообщить свою шкалу раньше, чем доходила перемотка, и
+         * место терялось. У записи подсказки не было вовсе — после
+         * перемотки плеер стоял на нуле при кусках на 552-й секунде и через
+         * семь секунд объявлял «стою и не гружу».
+         */
+        if (sabr != null && startAt > 0) {
+            ready.setMediaSource(source, (startAt * 1000).toLong())
+        } else {
+            ready.setMediaSource(source)
+        }
+
         ready.prepare()
 
         /**
@@ -830,7 +877,7 @@ object PlayerEngine {
          * У записи на подаче прыгать по-прежнему незачем: там начало
          * задаёт сам источник, и лента у него от нуля.
          */
-        if (startAt > 0 && (sabr == null || sabr?.liveMode == true)) {
+        if (startAt > 0 && sabr == null) {
             ready.seekTo((startAt * 1000).toLong())
         }
 
@@ -916,19 +963,20 @@ object PlayerEngine {
         stream.rewindTo(seconds)
 
         /**
-         * Начальное место плееру **не** задаём, хотя соблазн есть.
+         * Место плееру задаём — вместе с источником, одним вызовом.
          *
-         * Задать его — значит попросить прыжок по ленте, а лента здесь
-         * не ищется: длина потока неизвестна, разметки для поиска нет.
-         * Плеер на такую просьбу перезаряжает источник целиком, прыжок
-         * растягивается на секунды, а место так и остаётся у начала —
-         * и часы, которым велено показывать цель, пока плеер её не
-         * достигнет, замирают на ней навсегда.
+         * Прежде не задавали: по источнику без разметки для поиска плеер
+         * сводил любой прыжок к нулю. Лента тогда начиналась со времени
+         * первого куска сама — звук сдвигал часы к метке первого сэмпла, —
+         * но это гонка: если плеер успевал решить, что «набрано на 552
+         * секунды вперёд», он переставал грузить раньше, чем звук сдвигал
+         * часы, и через семь секунд объявлял «стою и не гружу».
          *
-         * Начало задаётся тем, какие куски мы отдадим, а не просьбой
-         * к плееру.
+         * Теперь по записи ищется карта фрагментов (`sidx`), по эфиру —
+         * наша карта «можно всегда» (`LiveSeekableExtractor`), и место,
+         * отданное вместе с источником, доходит до плеера без гонки.
          */
-        ready.setMediaSource(SabrSource.build(stream, seconds))
+        ready.setMediaSource(SabrSource.build(stream, seconds), (seconds * 1000).toLong())
         ready.prepare()
 
         // Свести дорожки к заказанному мигу — но позже, по готовности буфера.
@@ -1252,6 +1300,9 @@ object PlayerEngine {
 
     private var ticking = false
 
+    /** Когда началась подгрузка посреди показа; 0 — показ идёт. */
+    private var stallFrom = 0L
+
     private val ticker = object : Runnable {
         override fun run() {
             if (!ticking) {
@@ -1438,6 +1489,24 @@ object PlayerEngine {
 
         override fun onPlaybackStateChanged(state: Int) {
             watchStall(state)
+
+            /**
+             * Подгрузка посреди показа — в журнал, с длительностью.
+             *
+             * Без этого по журналу не видно, стоял ли показ: подача
+             * пишет о кусках, а не о том, что видит человек.
+             */
+            if (played && state == Player.STATE_BUFFERING && stallFrom == 0L) {
+                stallFrom = System.currentTimeMillis()
+
+                Log.d { "[YouTube/Плеер] Подгрузка на ${position().toInt()} с" }
+            } else if (state == Player.STATE_READY && stallFrom > 0) {
+                val spent = System.currentTimeMillis() - stallFrom
+
+                stallFrom = 0L
+
+                Log.d { "[YouTube/Плеер] Подгрузка кончилась за $spent мс" }
+            }
 
             if (state == Player.STATE_READY) {
                 if (!played) {

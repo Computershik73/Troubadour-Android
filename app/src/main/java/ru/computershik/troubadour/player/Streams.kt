@@ -341,6 +341,8 @@ object Streams {
         )
 
         result.xtags = Json.text(format, "xtags")
+        result.height = tierIn(format)
+        result.fps = Json.int(format, "fps")
 
         return result
     }
@@ -918,6 +920,8 @@ object Streams {
 
         sabr.wantedHeight = if (sabrExact) tierIn(video) else 0
 
+        sabr.portraitFrame = Json.int(video, "height") > Json.int(video, "width")
+
         val allVideo = ArrayList<SabrFormat>()
         val everyVideo = ArrayList<SabrFormat>()
         val everyAudio = ArrayList<SabrFormat>()
@@ -1075,6 +1079,21 @@ object Streams {
         sabr.liveMode = sabrLive
 
         sabr.setAvailable(allVideo, allAudio)
+
+        // Видеодорожки ролика целиком — чтобы чужой кусок не попал в звук.
+        val videoItags = HashSet<Int>()
+
+        if (adaptive != null) {
+            for (index in 0 until adaptive.length()) {
+                val format = adaptive.opt(index) as? JSONObject ?: continue
+
+                if (Json.text(format, "mimeType")?.startsWith("video/") == true) {
+                    videoItags.add(Json.int(format, "itag"))
+                }
+            }
+        }
+
+        sabr.knownVideoItags = videoItags
 
         Log.d {
             "[YouTube/Подача] В предпочтениях: видео ${allVideo.size}, " +
