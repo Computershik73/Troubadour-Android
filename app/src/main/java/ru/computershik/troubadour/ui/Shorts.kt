@@ -871,9 +871,46 @@ class ShortsView(context: Context) : FrameLayout(context) {
     // --- Свайпы -----------------------------------------------------------
 
     private var downY = 0f
+    private var downX = 0f
 
-    override fun onInterceptTouchEvent(event: MotionEvent): Boolean =
-        event.actionMasked == MotionEvent.ACTION_MOVE
+    /** Дрожание пальца, которое листанием не считается, — системный порог. */
+    private val touchSlop =
+        android.view.ViewConfiguration.get(context).scaledTouchSlop.toFloat()
+
+    /**
+     * Касание кнопок отдаём кнопкам, листаем только настоящим свайпом.
+     *
+     * Прежде листалка забирала касание при **любом** движении — палец же
+     * при нажатии почти всегда сдвигается на пиксель-другой, и нажатие
+     * на комментарии или лайк уходило листалке. Хуже того, начало
+     * касания она записывала только тогда, когда касание сразу шло ей
+     * самой: легло оно на кнопку — начало оставалось от прошлого жеста,
+     * сдвиг выходил огромным, и лента перелистывалась вместо того, чтобы
+     * открыть комментарии.
+     *
+     * Теперь начало записывается всегда, а забираем мы касание, только
+     * когда палец ушёл по вертикали дальше порога дрожания и заметно
+     * больше, чем вбок.
+     */
+    override fun onInterceptTouchEvent(event: MotionEvent): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                downY = event.y
+                downX = event.x
+
+                return false
+            }
+
+            MotionEvent.ACTION_MOVE -> {
+                val dy = kotlin.math.abs(event.y - downY)
+                val dx = kotlin.math.abs(event.x - downX)
+
+                return dy > touchSlop * 2 && dy > dx * 1.5f
+            }
+        }
+
+        return false
+    }
 
     /**
      * Страница идёт за пальцем, а не прыгает по отпусканию.
@@ -893,7 +930,10 @@ class ShortsView(context: Context) : FrameLayout(context) {
         }
 
         when (event.actionMasked) {
-            MotionEvent.ACTION_DOWN -> downY = event.y
+            MotionEvent.ACTION_DOWN -> {
+                downY = event.y
+                downX = event.x
+            }
 
             MotionEvent.ACTION_MOVE -> {
                 var shift = event.y - downY
