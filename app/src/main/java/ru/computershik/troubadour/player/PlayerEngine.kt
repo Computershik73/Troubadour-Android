@@ -354,6 +354,10 @@ object PlayerEngine {
         surface = null
     }
 
+    /** Куда плеер рисует сейчас; null — никуда. */
+    val attachedSurface: TextureView?
+        get() = surface
+
     fun attach(view: TextureView?) {
         surface = view
 

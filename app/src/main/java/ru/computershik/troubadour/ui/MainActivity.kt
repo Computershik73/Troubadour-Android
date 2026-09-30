@@ -2,19 +2,33 @@ package ru.computershik.troubadour.ui
 
 import android.os.Looper
 import ru.computershik.troubadour.Settings
+import android.annotation.TargetApi
 import android.app.Activity
+import android.app.PendingIntent
+import android.app.PictureInPictureParams
+import android.app.RemoteAction
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.graphics.Color
+import android.graphics.drawable.Icon
 import android.os.Build
 import android.os.Bundle
+import android.util.Rational
+import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.FrameLayout
 import ru.computershik.troubadour.Log
 import ru.computershik.troubadour.Notify
+import ru.computershik.troubadour.loc
 import ru.computershik.troubadour.net.PoToken
 import ru.computershik.troubadour.player.MiniPlayer
+import ru.computershik.troubadour.player.NowPlaying
 import ru.computershik.troubadour.player.PlayerEngine
 
 /**
@@ -116,6 +130,10 @@ class MainActivity : Activity() {
         setContentView(root)
 
         applySystemBars()
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            registerReceiver(pipReceiver, IntentFilter(ACTION_PIP_TOGGLE))
+        }
 
         Notify.on(Notify.THEME, this) {
             root.setBackgroundColor(Theme.background)
@@ -446,6 +464,27 @@ class MainActivity : Activity() {
          * Вернулись из фона — флаг мог не пережить ухода, а показ идёт.
          */
         applyKeepAwake()
+
+        // Окно развернули обратно на весь экран — оно больше не наше дело.
+        leftInPip = false
+    }
+
+    override fun onStop() {
+        super.onStop()
+
+        /**
+         * Окно смахнули, а не развернули.
+         *
+         * Развёрнутое окно сначала возвращает экран (`onResume`) и снимает
+         * пометку, смахнутое — сразу останавливает его. Играть дальше
+         * в никуда незачем: так же поступает и YouTube.
+         */
+        if (leftInPip) {
+            leftInPip = false
+
+            PlayerEngine.pause()
+            NowPlaying.update()
+        }
     }
 
     override fun onPause() {
@@ -458,6 +497,14 @@ class MainActivity : Activity() {
         super.onDestroy()
 
         Notify.offAll(this)
+        Notify.offAll(pipOwner)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            try {
+                unregisterReceiver(pipReceiver)
+            } catch (error: Throwable) {
+            }
+        }
 
         Nav.host = null
 
@@ -475,7 +522,194 @@ class MainActivity : Activity() {
         }
     }
 
+    // --- Картинка в картинке ---------------------------------------------
+
+    /**
+     * Ролик в мини-окне поверх других приложений, пока наше свёрнуто.
+     *
+     * На Android 8 и новее: раньше такого режима у телефонов нет. Окно
+     * открывается само, когда человек уходит из приложения (кнопкой
+     * «Домой» или жестом), а ролик в этот миг идёт. На паузе — нет:
+     * держать на экране стоящий кадр незачем.
+     *
+     * В окне остаётся только кадр. Всё остальное — ленты, панели, пульт —
+     * в окошке размером с почтовую марку не нужно, поэтому поверх всего
+     * встаёт чёрная подложка со своей поверхностью, и плеер на время
+     * рисует в неё. Экраны под ней не трогаем: вернётся человек —
+     * подложка уйдёт, и всё окажется ровно там, где было.
+     */
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+
+        enterPipIfPlaying()
+    }
+
+    private fun enterPipIfPlaying() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            return
+        }
+
+        if (PlayerEngine.videoId == null || !PlayerEngine.holdsScreen ||
+            PlayerEngine.attachedSurface == null
+        ) {
+            return
+        }
+
+        if (!packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)) {
+            return
+        }
+
+        try {
+            enterPictureInPictureMode(pipParams())
+        } catch (error: Throwable) {
+            // Режим бывает запрещён человеком в настройках системы.
+            Log.d { "[YouTube/Окно] Картинка в картинке не открылась: ${error.message}" }
+        }
+    }
+
+    @TargetApi(Build.VERSION_CODES.O)
+    private fun pipParams(): PictureInPictureParams {
+        // Система принимает пропорции окна от 1:2,39 до 2,39:1.
+        val ratio = PlayerEngine.videoRatio.coerceIn(0.42f, 2.39f)
+
+        val playing = PlayerEngine.holdsScreen
+        val label = if (playing) loc("Пауза") else loc("Играть")
+
+        val toggle = PendingIntent.getBroadcast(
+            this, 10,
+            Intent(ACTION_PIP_TOGGLE).setPackage(packageName),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val action = RemoteAction(
+            Icon.createWithResource(
+                this,
+                if (playing) android.R.drawable.ic_media_pause
+                else android.R.drawable.ic_media_play
+            ),
+            label, label, toggle
+        )
+
+        return PictureInPictureParams.Builder()
+            .setAspectRatio(Rational((ratio * 1000).toInt(), 1000))
+            .setActions(listOf(action))
+            .build()
+    }
+
+    /** Кнопка в окне меняет вид вместе с плеером. */
+    private fun updatePipActions() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || !isInPictureInPictureMode) {
+            return
+        }
+
+        try {
+            setPictureInPictureParams(pipParams())
+        } catch (error: Throwable) {
+        }
+    }
+
+    override fun onPictureInPictureModeChanged(
+        isInPictureInPictureMode: Boolean,
+        newConfig: Configuration
+    ) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+
+        if (isInPictureInPictureMode) {
+            showPipFrame()
+        } else {
+            hidePipFrame()
+        }
+    }
+
+    private fun showPipFrame() {
+        leftInPip = true
+
+        if (pipBox != null) {
+            return
+        }
+
+        val box = FrameLayout(this)
+
+        box.setBackgroundColor(Color.BLACK)
+
+        val texture = TextureView(this)
+
+        box.addView(
+            texture,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+
+        root.addView(
+            box,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+
+        pipBox = box
+        pipSurface = texture
+        surfaceBeforePip = PlayerEngine.attachedSurface
+
+        PlayerEngine.attach(texture)
+
+        Notify.on(PlayerEngine.STATE, pipOwner) { updatePipActions() }
+
+        Log.d { "[YouTube/Окно] Ролик ушёл в окно поверх других приложений" }
+    }
+
+    private fun hidePipFrame() {
+        val box = pipBox ?: return
+
+        Notify.offAll(pipOwner)
+
+        /**
+         * Возвращаем плееру прежнюю поверхность — но только если за это
+         * время её никто не сменил. Сменить могли: следующий ролик
+         * подборки открывается своим экраном и берёт свою поверхность.
+         */
+        if (PlayerEngine.attachedSurface === pipSurface) {
+            PlayerEngine.attach(surfaceBeforePip)
+        }
+
+        root.removeView(box)
+
+        pipBox = null
+        pipSurface = null
+        surfaceBeforePip = null
+
+        Log.d { "[YouTube/Окно] Окно закрыто" }
+    }
+
+    /** Подложка с кадром, пока приложение в окне. */
+    private var pipBox: FrameLayout? = null
+    private var pipSurface: TextureView? = null
+
+    /** Куда плеер рисовал до окна — туда он и вернётся. */
+    private var surfaceBeforePip: TextureView? = null
+
+    /** Окно открывали, а на весь экран приложение с тех пор не возвращалось. */
+    private var leftInPip = false
+
+    /** Хозяин подписок окна — чтобы снимать их, не трогая остальные. */
+    private val pipOwner = Any()
+
+    private val pipReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            PlayerEngine.togglePlay()
+
+            NowPlaying.update()
+
+            updatePipActions()
+        }
+    }
 }
+
+/** Кнопка «играть/пауза» в окне картинки в картинке. */
+private const val ACTION_PIP_TOGGLE = "ru.computershik.troubadour.PIP_TOGGLE"
 
 /** Сколько ждать после простоя, прежде чем браться за PO-токен. */
 private const val PO_DELAY = 1000L

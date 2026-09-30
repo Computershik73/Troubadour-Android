@@ -10,9 +10,13 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.os.Build
 import android.os.IBinder
+import android.support.v4.media.MediaMetadataCompat
+import android.support.v4.media.session.MediaSessionCompat
+import android.support.v4.media.session.PlaybackStateCompat
 import androidx.core.app.NotificationCompat
 import ru.computershik.troubadour.App
 import ru.computershik.troubadour.Log
+import ru.computershik.troubadour.Notify
 import ru.computershik.troubadour.R
 import ru.computershik.troubadour.ui.ImageLoader
 import ru.computershik.troubadour.ui.MainActivity
@@ -62,6 +66,27 @@ object NowPlaying {
 
     @Volatile
     private var running = false
+
+    /**
+     * Медиасеанс — по нему Android рисует плеер в шторке и на замке.
+     *
+     * Без него карточка была обычным беззвучным уведомлением в самом низу
+     * шторки: без обложки, без полосы, без значка наверху, и на Android 13+
+     * её попросту не замечали — «уведомления нет». С сеансом система
+     * ставит ролик в свой плеер над уведомлениями и на экран блокировки,
+     * а кнопки гарнитуры начинают управлять показом.
+     *
+     * Заводится с Android 5: раньше сеансу нужен приёмник кнопок в
+     * манифесте, а старым системам хватает и самой карточки.
+     */
+    @Volatile
+    private var session: MediaSessionCompat? = null
+
+    /** Хозяин подписки на состояние плеера — пока карточка на экране. */
+    private val sessionOwner = Any()
+
+    private const val CUSTOM_BACK = "back"
+    private const val CUSTOM_FORWARD = "forward"
 
     /**
      * Показывает карточку и удерживает приложение в фоне.
@@ -117,6 +142,18 @@ object NowPlaying {
         running = false
         artwork = null
 
+        Notify.offAll(sessionOwner)
+
+        session?.let {
+            try {
+                it.isActive = false
+                it.release()
+            } catch (error: Throwable) {
+            }
+        }
+
+        session = null
+
         val context = App.require()
 
         context.stopService(Intent(context, PlaybackService::class.java))
@@ -132,6 +169,8 @@ object NowPlaying {
 
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE)
             as? NotificationManager ?: return
+
+        updateSession(context)
 
         try {
             manager.notify(NOTIFICATION, build(context))
@@ -181,7 +220,8 @@ object NowPlaying {
             pendingFlags()
         )
 
-        val playing = PlayerEngine.isPlaying
+        // Доигравший ролик — уже не «играет», хоть плеер и держит `playWhenReady`.
+        val playing = PlayerEngine.holdsScreen
 
         val builder = NotificationCompat.Builder(context, CHANNEL)
             .setSmallIcon(android.R.drawable.ic_media_play)
@@ -217,16 +257,153 @@ object NowPlaying {
          * он нужен ради кнопок на гарнитуре и замке, а здесь довольно
          * самой карточки.
          */
-        builder.setStyle(
-            androidx.media.app.NotificationCompat.MediaStyle()
-                .setShowActionsInCompactView(0, 1, 2)
-                .setShowCancelButton(true)
-                .setCancelButtonIntent(stop)
-        )
+        val style = androidx.media.app.NotificationCompat.MediaStyle()
+            .setShowActionsInCompactView(0, 1, 2)
+            .setShowCancelButton(true)
+            .setCancelButtonIntent(stop)
+
+        session?.let { style.setMediaSession(it.sessionToken) }
+
+        builder.setStyle(style)
 
         artwork?.let { builder.setLargeIcon(it) }
 
         return builder.build()
+    }
+
+    private fun ensureSession(context: Context): MediaSessionCompat? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
+            return null
+        }
+
+        session?.let { return it }
+
+        val created = try {
+            MediaSessionCompat(context, "Troubadour")
+        } catch (error: Throwable) {
+            Log.d { "[YouTube/Фон] Медиасеанс не завёлся: ${error.message}" }
+
+            return null
+        }
+
+        created.setCallback(object : MediaSessionCompat.Callback() {
+            override fun onPlay() {
+                // Доигравший ролик кнопка «играть» начинает сначала.
+                val length = PlayerEngine.duration()
+
+                if (length > 0 && PlayerEngine.position() >= length - 0.5) {
+                    PlayerEngine.seekTo(0.0)
+                }
+
+                PlayerEngine.play()
+                update()
+            }
+
+            override fun onPause() {
+                PlayerEngine.pause()
+                update()
+            }
+
+            override fun onSeekTo(pos: Long) {
+                PlayerEngine.seekTo(maxOf(0.0, pos / 1000.0))
+                update()
+            }
+
+            override fun onRewind() {
+                PlayerEngine.seekTo(maxOf(0.0, PlayerEngine.position() - STEP_BACK))
+                update()
+            }
+
+            override fun onFastForward() {
+                PlayerEngine.seekTo(PlayerEngine.position() + STEP_FORWARD)
+                update()
+            }
+
+            override fun onCustomAction(action: String?, extras: android.os.Bundle?) {
+                when (action) {
+                    CUSTOM_BACK -> onRewind()
+                    CUSTOM_FORWARD -> onFastForward()
+                }
+            }
+
+            override fun onStop() {
+                PlayerEngine.pause()
+                hide()
+            }
+        })
+
+        created.isActive = true
+
+        session = created
+
+        // Пауза, продолжение, конец ролика — карточка следует за плеером сама.
+        Notify.on(PlayerEngine.STATE, sessionOwner) { update() }
+
+        Log.d { "[YouTube/Фон] Медиасеанс заведён" }
+
+        return created
+    }
+
+    /** Что играет и где мы сейчас — для плеера в шторке и на замке. */
+    private fun updateSession(context: Context) {
+        val current = ensureSession(context) ?: return
+
+        val meta = MediaMetadataCompat.Builder()
+            .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
+            .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, author)
+            .putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_TITLE, title)
+            .putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_SUBTITLE, author)
+
+        val length = (PlayerEngine.duration() * 1000).toLong()
+
+        if (length > 0) {
+            meta.putLong(MediaMetadataCompat.METADATA_KEY_DURATION, length)
+        }
+
+        artwork?.let {
+            meta.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, it)
+            meta.putBitmap(MediaMetadataCompat.METADATA_KEY_DISPLAY_ICON, it)
+        }
+
+        val playing = PlayerEngine.holdsScreen
+
+        /**
+         * «Назад» и «вперёд» — своими действиями, а не переходом
+         * к соседнему ролику: плеер системы рисует на месте перехода
+         * значки «предыдущий» и «следующий», а кнопки у нас двигают
+         * ролик на несколько секунд.
+         */
+        val state = PlaybackStateCompat.Builder()
+            .setActions(
+                PlaybackStateCompat.ACTION_PLAY or
+                    PlaybackStateCompat.ACTION_PAUSE or
+                    PlaybackStateCompat.ACTION_PLAY_PAUSE or
+                    PlaybackStateCompat.ACTION_SEEK_TO or
+                    PlaybackStateCompat.ACTION_REWIND or
+                    PlaybackStateCompat.ACTION_FAST_FORWARD or
+                    PlaybackStateCompat.ACTION_STOP
+            )
+            .addCustomAction(
+                CUSTOM_BACK, ru.computershik.troubadour.loc("Назад"),
+                android.R.drawable.ic_media_rew
+            )
+            .addCustomAction(
+                CUSTOM_FORWARD, ru.computershik.troubadour.loc("Вперёд"),
+                android.R.drawable.ic_media_ff
+            )
+            .setState(
+                if (playing) PlaybackStateCompat.STATE_PLAYING
+                else PlaybackStateCompat.STATE_PAUSED,
+                (PlayerEngine.position() * 1000).toLong(),
+                if (playing) 1f else 0f
+            )
+
+        try {
+            current.setMetadata(meta.build())
+            current.setPlaybackState(state.build())
+        } catch (error: Throwable) {
+            Log.d { "[YouTube/Фон] Медиасеанс не обновился: ${error.message}" }
+        }
     }
 
     /** На сколько отступает кнопка «назад» в шторке. */
